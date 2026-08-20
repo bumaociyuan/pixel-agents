@@ -137,7 +137,7 @@ export class PiCrewFeedWatcher {
 
   private dispatchEvent(event: FeedEvent, feedPath: string): void {
     // Extract project dir from feed path: /path/to/project/.pi/messenger/feed.jsonl → /path/to/project
-    const projectDir = path.dirname(path.dirname(feedPath));
+    const projectDir = path.dirname(path.dirname(path.dirname(feedPath)));
     const payloads = feedEventToHookPayloads(event, projectDir);
     for (const payload of payloads) {
       this.postToHook(payload);

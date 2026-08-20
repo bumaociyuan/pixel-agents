@@ -1113,9 +1113,11 @@ export function adoptExternalSessionFromHook(
       onAgentCreated?.(adoptedAgent);
     }
   } else {
-    // Hooks-only provider (OpenCode, Copilot): no transcript file, all state from hooks
+    // Hooks-only provider (OpenCode, Copilot, pi-crew): no transcript file, all state from hooks
     const id = nextAgentIdRef.current++;
     const folderName = folderNameResolver?.({ cwd }) ?? (cwd ? path.basename(cwd) : undefined);
+    // Extract agent name from session_id: "pi-crew:crew-planner" → "crew-planner"
+    const agentName = sessionId.includes(':') ? sessionId.split(':').pop() : undefined;
     const agent: AgentState = {
       id,
       sessionId,
@@ -1140,6 +1142,7 @@ export function adoptExternalSessionFromHook(
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
       folderName,
+      agentName,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     };
