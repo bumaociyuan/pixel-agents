@@ -32,14 +32,9 @@ interface FeedFileState {
   lineBuffer: string;
 }
 
-/** Auto-cleanup workers that haven't received a task.done/reset within this window. */
-const WORKER_TIMEOUT_MS = 60_000;
-
 export class PiCrewFeedWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
   private feedStates = new Map<string, FeedFileState>();
-  /** Track active workers: agentName → { timeout, sessionId } */
-  private activeWorkers = new Map<string, { timer: ReturnType<typeof setTimeout>; sessionId: string }>();
 
   constructor(private opts: FeedWatcherOptions) {}
 
@@ -60,17 +55,13 @@ export class PiCrewFeedWatcher {
     this.poll();
   }
 
-  /** Stop the poll loop and clear all worker timeouts. */
+  /** Stop the poll loop. */
   stop(): void {
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
+      console.log('[Pixel Agents] pi-crew: feed watcher stopped');
     }
-    for (const [, entry] of this.activeWorkers) {
-      clearTimeout(entry.timer);
-    }
-    this.activeWorkers.clear();
-    console.log('[Pixel Agents] pi-crew: feed watcher stopped');
   }
 
   /** Check if the watcher is currently running. */
@@ -147,49 +138,9 @@ export class PiCrewFeedWatcher {
   private dispatchEvent(event: FeedEvent, feedPath: string): void {
     // Extract project dir from feed path: /path/to/project/.pi/messenger/feed.jsonl → /path/to/project
     const projectDir = path.dirname(path.dirname(path.dirname(feedPath)));
-
-    const agentName = event.agent || 'unknown';
-
-    // Auto-cleanup: when a worker starts, set a timeout. Clear it when
-    // task.done/reset arrives. If the timeout fires, send SessionEnd.
-    if (event.type === 'task.start') {
-      this.scheduleWorkerTimeout(agentName, projectDir);
-    } else if (event.type === 'task.done' || event.type === 'task.reset') {
-      this.clearWorkerTimeout(agentName);
-    }
-
     const payloads = feedEventToHookPayloads(event, projectDir);
     for (const payload of payloads) {
       this.postToHook(payload);
-    }
-  }
-
-  private scheduleWorkerTimeout(agentName: string, projectDir: string): void {
-    // Clear any existing timeout for this agent (re-use)
-    this.clearWorkerTimeout(agentName);
-
-    const sessionId = `pi-crew:${agentName}`;
-    const timer = setTimeout(() => {
-      this.activeWorkers.delete(agentName);
-      console.log(
-        `[Pixel Agents] pi-crew: worker "${agentName}" timed out after ${WORKER_TIMEOUT_MS / 1000}s, sending SessionEnd`,
-      );
-      this.postToHook({
-        hook_event_name: 'CrewSessionEnd',
-        session_id: sessionId,
-        agent_name: agentName,
-        reason: 'timeout',
-      });
-    }, WORKER_TIMEOUT_MS);
-
-    this.activeWorkers.set(agentName, { timer, sessionId });
-  }
-
-  private clearWorkerTimeout(agentName: string): void {
-    const entry = this.activeWorkers.get(agentName);
-    if (entry) {
-      clearTimeout(entry.timer);
-      this.activeWorkers.delete(agentName);
     }
   }
 
