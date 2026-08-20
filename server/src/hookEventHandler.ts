@@ -62,33 +62,51 @@ export class HookEventHandler {
   /** Highest HookProvider.protocolVersion this handler understands. */
   private static readonly SUPPORTED_PROTOCOL_VERSION = 1;
 
+  /** Map of provider id → provider, for routing events to the correct normalizer. */
+  private readonly providers: Map<string, HookProvider>;
+  /** Default provider: used when no providerId match is found (backward compat). */
+  private readonly defaultProvider: HookProvider;
+
   constructor(
     private agents: AgentStateStore,
     private waitingTimers: Map<number, ReturnType<typeof setTimeout>>,
     private permissionTimers: Map<number, ReturnType<typeof setTimeout>>,
-    private provider: HookProvider,
+    providers: HookProvider[],
     private sessionRouter: SessionRouter,
     private watchAllSessionsRef?: { current: boolean },
   ) {
-    if (provider.protocolVersion !== HookEventHandler.SUPPORTED_PROTOCOL_VERSION) {
-      console.warn(
-        `[Pixel Agents] HookProvider "${provider.id}" reports protocolVersion=${provider.protocolVersion}, ` +
-          `but handler understands ${HookEventHandler.SUPPORTED_PROTOCOL_VERSION}. ` +
-          `Events from this provider will be dropped.`,
-      );
+    if (providers.length === 0) {
+      throw new Error('HookEventHandler requires at least one HookProvider');
+    }
+    this.defaultProvider = providers[0];
+    this.providers = new Map(providers.map((p) => [p.id, p]));
+    for (const provider of providers) {
+      if (provider.protocolVersion !== HookEventHandler.SUPPORTED_PROTOCOL_VERSION) {
+        console.warn(
+          `[Pixel Agents] HookProvider "${provider.id}" reports protocolVersion=${provider.protocolVersion}, ` +
+            `but handler understands ${HookEventHandler.SUPPORTED_PROTOCOL_VERSION}. ` +
+            `Events from this provider will be dropped.`,
+        );
+      }
     }
   }
 
+  /** Resolve a provider by id, falling back to the default provider. */
+  private resolveProvider(providerId: string): HookProvider {
+    return this.providers.get(providerId) ?? this.defaultProvider;
+  }
+
   /** Merged set of tool names that spawn subagents (teammates + within-turn subagents
-   *  when a team provider is attached, or the base HookProvider set otherwise). */
+   *  when a team provider is attached, or the base HookProvider set otherwise).
+   *  Uses the default provider — only Claude has team support today. */
   private getSubagentToolSet(): ReadonlySet<string> {
-    if (this.provider.team) {
+    if (this.defaultProvider.team) {
       return new Set<string>([
-        ...this.provider.team.teammateSpawnTools,
-        ...this.provider.team.withinTurnSubagentTools,
+        ...this.defaultProvider.team.teammateSpawnTools,
+        ...this.defaultProvider.team.withinTurnSubagentTools,
       ]);
     }
-    return this.provider.subagentToolNames;
+    return this.defaultProvider.subagentToolNames;
   }
 
   /** Check if a session is tracked (in workspace project dir, or Watch All Sessions ON). */
@@ -129,18 +147,17 @@ export class HookEventHandler {
    * @param providerId - Provider that sent the event ('claude', 'codex', etc.)
    * @param event - The hook event payload from the CLI tool
    */
-  handleEvent(_providerId: string, event: HookEvent): void {
-    if (this.provider.protocolVersion !== HookEventHandler.SUPPORTED_PROTOCOL_VERSION) {
+  handleEvent(providerId: string, event: HookEvent): void {
+    const provider = this.resolveProvider(providerId);
+    if (provider.protocolVersion !== HookEventHandler.SUPPORTED_PROTOCOL_VERSION) {
       return; // version mismatch already logged in constructor
     }
     // ── Provider normalization boundary ───────────────────────────────────────
-    // All raw Claude-specific fields (tool_name, tool_input, agent_type, teammate_name,
-    // task_subject, notification_type,
-    // reason, source) are extracted by provider.normalizeHookEvent. Downstream dispatch
-    // uses the normalized AgentEvent.kind. Raw `event.*` reads are still allowed in a few
-    // places for provider-specific metadata that AgentEvent doesn't capture (transcript_path,
-    // cwd for external-session adoption; event-specific teammate identity for routing).
-    const normalized = this.provider.normalizeHookEvent(event);
+    // Each provider translates its own raw event format into the canonical AgentEvent.
+    // All provider-specific fields (tool_name, tool_input, agent_type, etc.) are
+    // extracted by the provider's normalizeHookEvent. Downstream dispatch uses the
+    // normalized AgentEvent.kind.
+    const normalized = provider.normalizeHookEvent(event);
     if (!normalized) return; // unknown / uninteresting event -- silently drop
     const normEvent = normalized.event;
     const eventName = event.hook_event_name; // retained for logs only
@@ -244,12 +261,10 @@ export class HookEventHandler {
           transcriptPath,
           cwd: cwd ?? '',
         });
-      } else {
-        if (debug && tracked)
+      } else if (debug && tracked)
           console.log(
             `[Pixel Agents] Hook: SessionStart -> unknown session ${sid}..., no transcript_path`,
           );
-      }
       return;
     }
 
@@ -277,7 +292,7 @@ export class HookEventHandler {
         pending.cwd,
       );
       // Re-process this event now that the agent exists
-      this.handleEvent(_providerId, event);
+      this.handleEvent(providerId, event);
       return;
     }
 
@@ -307,7 +322,7 @@ export class HookEventHandler {
           console.log(
             `[Pixel Agents] Hook: ${eventName} - unknown session ${event.session_id.slice(0, 8)}..., buffering`,
           );
-        this.sessionRouter.bufferEvent(_providerId, event);
+        this.sessionRouter.bufferEvent(providerId, event);
       }
       return;
     }
@@ -335,9 +350,9 @@ export class HookEventHandler {
         // identical for both (agentToolDone + clear currentHookToolId), so one branch suffices.
         return this.handlePostToolUse(agent, agentId);
       case 'subagentStart':
-        return this.provider.team ? this.handleSubagentStart(event, agent, agentId) : undefined;
+        return this.defaultProvider.team ? this.handleSubagentStart(event, agent, agentId) : undefined;
       case 'subagentEnd':
-        return this.provider.team ? this.handleSubagentStop(agent, agentId) : undefined;
+        return this.defaultProvider.team ? this.handleSubagentStop(agent, agentId) : undefined;
       case 'permissionRequest':
         // Handles BOTH the PermissionRequest hook AND the Notification(permission_prompt)
         // hook -- normalizeHookEvent collapses them into one event kind.
@@ -351,7 +366,7 @@ export class HookEventHandler {
         // Handles TeammateIdle AND TaskCompleted -- both normalize here. The normalized
         // `reason` field discriminates; the team-provider's extractTeammateNameFromEvent(raw)
         // still routes to the specific teammate. (TaskCreated normalizes to null in the provider.)
-        if (!this.provider.team) return;
+        if (!this.defaultProvider.team) return;
         if (normEvent.reason === 'completed') {
           return this.handleTaskCompleted(event, agentId);
         }
@@ -415,7 +430,7 @@ export class HookEventHandler {
   ): void {
     const toolName = normEvent.toolName;
     const toolInput = (normEvent.input as Record<string, unknown> | undefined) ?? {};
-    const status = this.provider.formatToolStatus(toolName, toolInput);
+    const status = this.defaultProvider.formatToolStatus(toolName, toolInput);
     const hookToolId = `hook-${Date.now()}`;
 
     // Track for PostToolUse/SubagentStart correlation (always, even if suppressed below).
@@ -424,7 +439,7 @@ export class HookEventHandler {
     agent.currentHookToolId = hookToolId;
     agent.currentHookToolName = toolName;
     agent.currentHookIsTeammateSpawn =
-      this.provider.team?.isTeammateSpawnCall(toolName, toolInput) ?? false;
+      this.defaultProvider.team?.isTeammateSpawnCall(toolName, toolInput) ?? false;
 
     // When a lead has inline teammates, hook tool events are ambiguous (could be
     // from the lead or any teammate -- they share session_id). Suppress hook-originated
@@ -493,7 +508,7 @@ export class HookEventHandler {
    * the child character immediately via hooks without waiting for JSONL polling.
    */
   private handleSubagentStart(event: HookEvent, agent: AgentState, agentId: number): void {
-    const agentType = this.provider.team?.extractTeammateNameFromEvent(event) ?? 'unknown';
+    const agentType = this.defaultProvider.team?.extractTeammateNameFromEvent(event) ?? 'unknown';
 
     // Decide path: teammate spawn vs basic within-turn subagent.
     // Two conditions must BOTH hold for the teammate path:
@@ -503,7 +518,7 @@ export class HookEventHandler {
     //      Without this guard, external sessions firing run_in_background=true
     //      for parallel basic subagents would be mis-routed to teammate discovery.
     // Mirrors the same gate used by the periodic scanAllTeammateFiles fallback.
-    if (this.provider.team && agent.currentHookIsTeammateSpawn === true && agent.teamName) {
+    if (this.defaultProvider.team && agent.currentHookIsTeammateSpawn === true && agent.teamName) {
       if (debug)
         console.log(
           `[Pixel Agents] Hook: Agent ${agentId} - SubagentStart: teammate "${agentType}" detected, triggering discovery`,
@@ -646,7 +661,7 @@ export class HookEventHandler {
    * Fallback: if the agent has no inline teammates, mark the agent itself.
    */
   private handleTeammateIdle(event: HookEvent, agent: AgentState, agentId: number): void {
-    const teammateName = this.provider.team?.extractTeammateNameFromEvent(event);
+    const teammateName = this.defaultProvider.team?.extractTeammateNameFromEvent(event);
     const inlineTeammates = getInlineTeammates(agentId, this.agents);
 
     if (inlineTeammates.length === 0) {
@@ -690,7 +705,7 @@ export class HookEventHandler {
         : typeof event.subject === 'string'
           ? event.subject
           : '';
-    const teammateName = this.provider.team?.extractTeammateNameFromEvent(event);
+    const teammateName = this.defaultProvider.team?.extractTeammateNameFromEvent(event);
     if (debug)
       console.log(
         `[Pixel Agents] Hook: Agent ${agentId} - TaskCompleted: ${taskSubject}${teammateName ? ` (teammate_name=${teammateName})` : ''}`,

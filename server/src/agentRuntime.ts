@@ -87,16 +87,17 @@ export class AgentRuntime {
 
   constructor(
     private readonly store: AgentStateStore,
-    provider: HookProvider,
+    providers: HookProvider[],
   ) {
+    const defaultProvider = providers[0];
     // Wire module-level dependencies
     setDismissalTracker(this.dismissalTracker);
-    setHookProvider(provider);
-    setFileWatcherHookProvider(provider);
+    setHookProvider(defaultProvider);
+    setFileWatcherHookProvider(defaultProvider);
     this.subagentWatch = new SubagentWatch(store);
     setSubagentWatch(this.subagentWatch);
-    if (provider.team) {
-      setTeamProvider(provider.team);
+    if (defaultProvider.team) {
+      setTeamProvider(defaultProvider.team);
     }
     setAgentRemovalCallback((id) => this.removeAgent(id));
     setTeammateRemovalCallback((id) => this.removeTeammate(id, 'team-config'));
@@ -146,7 +147,7 @@ export class AgentRuntime {
       store,
       this.waitingTimers,
       this.permissionTimers,
-      provider,
+      providers,
       new SessionRouter(),
       this.watchAllSessions,
     );
@@ -161,7 +162,7 @@ export class AgentRuntime {
         // team. (Newer harnesses run every spawned agent as an independent
         // top-level session that fires its own hooks.)
         if (transcriptPath) {
-          const teamMeta = provider.team?.getTeamMetadataForSession(transcriptPath);
+          const teamMeta = defaultProvider.team?.getTeamMetadataForSession(transcriptPath);
           if (teamMeta?.teamName && teamMeta.agentName) {
             for (const [leadId, lead] of this.store) {
               if (lead.teamName !== teamMeta.teamName || lead.leadAgentId !== undefined) continue;
