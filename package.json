@@ -2,7 +2,7 @@
   "name": "@bumaociyuan/pixel-agents",
   "displayName": "Pixel Agents",
   "description": "Pixel art office where your Claude Code agents come to life as animated characters",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "repository": {
     "type": "git",
     "url": "https://github.com/bumaociyuan/pixel-agents"
