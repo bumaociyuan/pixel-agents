@@ -35,6 +35,9 @@ interface FeedFileState {
 export class PiCrewFeedWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
   private feedStates = new Map<string, FeedFileState>();
+  /** Track task ownership: taskId → agentName. When a new task.start
+   *  arrives for the same taskId, send SessionEnd for the old agent. */
+  private taskOwners = new Map<string, string>();
 
   constructor(private opts: FeedWatcherOptions) {}
 
@@ -138,6 +141,28 @@ export class PiCrewFeedWatcher {
   private dispatchEvent(event: FeedEvent, feedPath: string): void {
     // Extract project dir from feed path: /path/to/project/.pi/messenger/feed.jsonl → /path/to/project
     const projectDir = path.dirname(path.dirname(path.dirname(feedPath)));
+
+    // Event-driven cleanup: when a new worker claims a task, evict the old one.
+    // This handles the case where a worker was killed (Ctrl+C) without writing
+    // a task.reset event.
+    if (event.type === 'task.start' && event.target) {
+      const oldAgent = this.taskOwners.get(event.target);
+      if (oldAgent && oldAgent !== event.agent) {
+        console.log(
+          `[Pixel Agents] pi-crew: task "${event.target}" reassigned from "${oldAgent}" to "${event.agent}", sending SessionEnd for old worker`,
+        );
+        this.postToHook({
+          hook_event_name: 'CrewSessionEnd',
+          session_id: `pi-crew:${oldAgent}`,
+          agent_name: oldAgent,
+          reason: 'replaced',
+        });
+      }
+      this.taskOwners.set(event.target, event.agent);
+    } else if ((event.type === 'task.done' || event.type === 'task.reset') && event.target) {
+      this.taskOwners.delete(event.target);
+    }
+
     const payloads = feedEventToHookPayloads(event, projectDir);
     for (const payload of payloads) {
       this.postToHook(payload);
