@@ -94,6 +94,13 @@ export function feedEventToHookPayloads(
           task_id: taskId,
           task_title: event.preview || '',
         },
+        // Remove the worker character after task completes
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: sessionId,
+          agent_name: agentName,
+          reason: 'task.done',
+        },
       ];
     }
 
@@ -148,6 +155,13 @@ export function feedEventToHookPayloads(
           agent_name: 'crew-planner',
           tool_id: 'crew-plan',
         },
+        // Remove the planner character after planning completes
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: `pi-crew:crew-planner`,
+          agent_name: 'crew-planner',
+          reason: 'plan.done',
+        },
       ];
     }
 
@@ -186,9 +200,20 @@ export function feedEventToHookPayloads(
       ];
     }
 
+    case 'task.reset': {
+      return [
+        // Remove the worker character when task is reset (worker departed)
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: sessionId,
+          agent_name: agentName,
+          reason: 'task.reset',
+        },
+      ];
+    }
+
     case 'task.approve':
     case 'task.reject':
-    case 'task.reset':
     case 'task.split':
     case 'task.revise':
     case 'task.revise-tree': {
@@ -198,6 +223,18 @@ export function feedEventToHookPayloads(
           session_id: sessionId,
           agent_name: agentName,
           data: { type: event.type, preview: event.preview, target: event.target },
+        },
+      ];
+    }
+
+    case 'plan.cancel':
+    case 'plan.failed': {
+      return [
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: `pi-crew:crew-planner`,
+          agent_name: 'crew-planner',
+          reason: event.type,
         },
       ];
     }
