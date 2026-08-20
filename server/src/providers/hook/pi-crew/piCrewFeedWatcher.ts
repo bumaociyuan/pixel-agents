@@ -12,8 +12,9 @@ import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
-import type { FeedEvent } from './feedTypes.js';
+
 import { PI_CREW_FEED_INITIAL_TAIL_BYTES, PI_CREW_FEED_POLL_MS } from './constants.js';
+import type { FeedEvent } from './feedTypes.js';
 import { feedEventToHookPayloads } from './piCrew.js';
 
 export interface FeedWatcherOptions {
