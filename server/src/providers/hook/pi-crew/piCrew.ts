@@ -50,6 +50,7 @@ let feedWatcher: PiCrewFeedWatcher | null = null;
  */
 export function feedEventToHookPayloads(
   event: FeedEvent,
+  projectDir: string,
 ): Record<string, unknown>[] {
   const agentName = event.agent || 'unknown';
   const sessionId = `pi-crew:${agentName}`;
@@ -66,6 +67,7 @@ export function feedEventToHookPayloads(
           session_id: sessionId,
           agent_name: agentName,
           source: 'task.start',
+          cwd: projectDir,
         },
         // Start the task tool
         {
@@ -125,6 +127,7 @@ export function feedEventToHookPayloads(
           session_id: `pi-crew:crew-planner`,
           agent_name: 'crew-planner',
           source: 'plan.start',
+          cwd: projectDir,
         },
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.PLAN_START,
@@ -170,6 +173,7 @@ export function feedEventToHookPayloads(
           session_id: `pi-crew:crew-reviewer`,
           agent_name: 'crew-reviewer',
           source: 'task.review',
+          cwd: projectDir,
         },
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.TASK_START,
@@ -224,6 +228,7 @@ function normalizeHookEvent(
         event: {
           kind: 'sessionStart',
           source: typeof raw.source === 'string' ? raw.source : undefined,
+          cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
         },
       };
 
