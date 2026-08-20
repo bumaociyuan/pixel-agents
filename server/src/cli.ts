@@ -27,7 +27,7 @@ import {
 } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, copyHookScript, hookProviderById, hookProviders } from './providers/index.js';
+import { claudeProvider, copyHookScript, hookProviderById, hookProviders, piCrewProvider } from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -280,6 +280,16 @@ async function main(): Promise<void> {
       console.log(
         '[Pixel Agents] Hooks disabled — enable "Instant Detection (Hooks)" in the UI settings to install them.',
       );
+    }
+
+    // ── pi-crew: auto-install feed watcher on startup ──
+    if (getHooksEnabled(piCrewProvider.id) && getHooksConsent(piCrewProvider.id) === 'granted') {
+      try {
+        await piCrewProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+        console.log('[Pixel Agents] pi-crew: hooks installed');
+      } catch (err) {
+        console.error(`[Pixel Agents] pi-crew: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
 
     // Start scanning for external sessions (Claude running in user's terminal)
