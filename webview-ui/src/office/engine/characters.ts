@@ -164,8 +164,10 @@ export function updateCharacter(
       // Countdown wander timer
       ch.wanderTimer -= dt;
       if (ch.wanderTimer <= 0) {
-        // Check if we've wandered enough — return to seat for a rest
-        if (ch.wanderCount >= ch.wanderLimit && ch.seatId) {
+        // Check if we've wandered enough — return to seat for a rest.
+        // Only return to seat if the agent is active (working).
+        // Idle agents keep wandering indefinitely.
+        if (ch.wanderCount >= ch.wanderLimit && ch.seatId && ch.isActive) {
           const seat = seats.get(ch.seatId);
           if (seat) {
             const path = findPath(
