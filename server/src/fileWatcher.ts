@@ -415,22 +415,7 @@ export function scanForNewJsonlFiles(
           break;
         }
       }
-      if (!owned) {
-        knownJsonlFiles.add(file); // Claimed by terminal adoption
-        adoptTerminalForFile(
-          activeTerminal,
-          file,
-          projectDir,
-          nextAgentIdRef,
-          agents,
-          activeAgentIdRef,
-          fileWatchers,
-          pollingTimers,
-          waitingTimers,
-          permissionTimers,
-          persistAgents,
-        );
-      } else {
+      if (owned) {
         // Active terminal is owned -- scan for untracked Claude-named terminals.
         // Only adopt terminals with TERMINAL_NAME_PREFIX to avoid grabbing
         // pre-existing shells ("zsh", "bash") for /clear files.
@@ -466,6 +451,21 @@ export function scanForNewJsonlFiles(
             break;
           }
         }
+      } else {
+        knownJsonlFiles.add(file); // Claimed by terminal adoption
+        adoptTerminalForFile(
+          activeTerminal,
+          file,
+          projectDir,
+          nextAgentIdRef,
+          agents,
+          activeAgentIdRef,
+          fileWatchers,
+          pollingTimers,
+          waitingTimers,
+          permissionTimers,
+          persistAgents,
+        );
       }
     }
   }
@@ -750,11 +750,11 @@ export function scanForTeammateFiles(
       teamUsesTmux: parentAgent?.teamUsesTmux,
     };
 
-    if (parentAgent?.palette !== undefined) {
+    if (parentAgent?.palette === undefined) {
+      assignPaletteIfNeeded(agent, agents);
+    } else {
       agent.palette = parentAgent.palette;
       agent.hueShift = parentAgent.hueShift ?? 0;
-    } else {
-      assignPaletteIfNeeded(agent, agents);
     }
     agents.set(id, agent);
     persistAgents();
@@ -906,11 +906,11 @@ export function scanForBackgroundAgentFiles(
       spawnToolUseId: entry.toolUseId,
     };
 
-    if (lead.palette !== undefined) {
+    if (lead.palette === undefined) {
+      assignPaletteIfNeeded(agent, agents);
+    } else {
       agent.palette = lead.palette;
       agent.hueShift = lead.hueShift ?? 0;
-    } else {
-      assignPaletteIfNeeded(agent, agents);
     }
     agents.set(id, agent);
 
@@ -1579,7 +1579,10 @@ export function startStaleExternalAgentCheck(
       if (!agent.isExternal) continue;
       // Hooks-only agents (pi-crew, pi-agent) have no JSONL file — they are
       // managed by their provider's watcher, not the stale check.
-      if (agent.hooksOnly) continue;
+      if (agent.hooksOnly) {
+        console.log(`[Pixel Agents] Watcher: Agent ${id} - hooksOnly, skipping stale check`);
+        continue;
+      }
 
       // Only despawn if the JSONL file has been deleted from disk.
       // Inactive external agents stay alive so they can resume when
