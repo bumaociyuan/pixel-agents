@@ -59,6 +59,10 @@ export type AgentEvent =
       /** Working directory the session was started in. Used to match pending
        *  external sessions against known workspace folders. */
       cwd?: string;
+      /** Preferred area label for seat assignment. Passed from the watcher
+       *  through the hook event chain to guide the webview's findFreeSeat()
+       *  toward an area's chairs. */
+      preferredArea?: string;
     }
   | { kind: 'sessionEnd'; reason?: string };
 

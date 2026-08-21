@@ -38,6 +38,7 @@ interface SessionLifecycleCallbacks {
     transcriptPath: string | undefined,
     cwd: string,
     agentName?: string,
+    preferredArea?: string,
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -265,6 +266,7 @@ export class HookEventHandler {
             typeof (event as unknown as { agent_name?: unknown }).agent_name === 'string'
               ? (event as unknown as { agent_name: string }).agent_name
               : undefined,
+          preferredArea: normEvent.preferredArea,
         });
       } else if (debug && tracked)
         console.log(
@@ -296,6 +298,7 @@ export class HookEventHandler {
         pending.transcriptPath,
         pending.cwd,
         pending.agentName,
+        pending.preferredArea,
       );
       // Re-process this event now that the agent exists
       this.handleEvent(providerId, event);

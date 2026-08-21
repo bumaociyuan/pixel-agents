@@ -1061,6 +1061,7 @@ export function adoptExternalSessionFromHook(
   transcriptPath: string | undefined,
   cwd: string,
   hookAgentName: string | undefined,
+  preferredArea: string | undefined,
   knownJsonlFiles: Set<string>,
   nextAgentIdRef: { current: number },
   agents: AgentStateStore,
@@ -1145,6 +1146,7 @@ export function adoptExternalSessionFromHook(
       seenUnknownRecordTypes: new Set(),
       folderName,
       agentName,
+      preferredArea,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     };

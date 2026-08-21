@@ -51,6 +51,8 @@ function normalizeHookEvent(
           kind: 'sessionStart',
           source: typeof raw.source === 'string' ? raw.source : undefined,
           cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
+          preferredArea:
+            typeof raw.preferred_area === 'string' ? raw.preferred_area : undefined,
         },
       };
 

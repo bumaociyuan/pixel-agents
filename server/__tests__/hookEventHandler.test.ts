@@ -576,6 +576,8 @@ describe('HookEventHandler', () => {
       'ext-sess',
       '/projects/test/ext-sess.jsonl',
       '/projects/test',
+      undefined,
+      undefined,
     );
     // Stop was re-processed after agent creation
     const agent = agents.get(2);
@@ -721,6 +723,8 @@ describe('HookEventHandler', () => {
       'no-transcript-sess',
       undefined,
       '/projects/test',
+      undefined,
+      undefined,
     );
   });
 
@@ -856,5 +860,58 @@ describe('HookEventHandler', () => {
         }
       }
     });
+  });
+
+// ── preferredArea propagation ─────────────────────────────────
+
+  it('confirmation event passes preferredArea to onExternalSessionDetected', async () => {
+    const { piAgentProvider } = await import('../src/providers/hook/pi-agent/piAgent.js');
+    const piAgentHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      [piAgentProvider],
+      new SessionRouter(),
+    );
+
+    const onExternalSessionDetected = vi.fn();
+    piAgentHandler.setLifecycleCallbacks({ onExternalSessionDetected });
+
+    // SessionStart stores as pending with preferred_area
+    piAgentHandler.handleEvent('pi-agent', {
+      hook_event_name: 'PiSessionStart',
+      session_id: 'pref-sess',
+      source: 'herdr',
+      cwd: '/projects/test',
+      preferred_area: 'frontend',
+    });
+
+    expect(onExternalSessionDetected).not.toHaveBeenCalled();
+
+    // Simulate the provider creating the agent (callback side effect)
+    onExternalSessionDetected.mockImplementation((sessionId: string) => {
+      const agent = createTestAgent({
+        id: 3,
+        sessionId,
+        projectDir: '/projects/test',
+      } as Partial<AgentState>);
+      agents.set(3, agent);
+      piAgentHandler.registerAgent(sessionId, 3);
+    });
+
+    // PiTurnEnd confirms the session -> creates agent -> re-processes the event
+    piAgentHandler.handleEvent('pi-agent', {
+      hook_event_name: 'PiTurnEnd',
+      session_id: 'pref-sess',
+    });
+
+    // preferredArea should be passed as the 5th argument
+    expect(onExternalSessionDetected).toHaveBeenCalledWith(
+      'pref-sess',
+      undefined,
+      '/projects/test',
+      undefined,
+      'frontend',
+    );
   });
 });

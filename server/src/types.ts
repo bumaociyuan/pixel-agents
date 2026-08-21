@@ -22,6 +22,10 @@ export interface AgentState {
   hadToolsInTurn: boolean;
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
+  /** Preferred area label for seat assignment. Set from the hook event chain
+   *  when the watcher provides area info. Primarily for debugging; the actual
+   *  seat assignment uses folderName to look up areaMappings. */
+  preferredArea?: string;
   /** Timestamp of last JSONL data received (ms since epoch) */
   lastDataAt: number;
   /** Total JSONL lines processed for this agent */

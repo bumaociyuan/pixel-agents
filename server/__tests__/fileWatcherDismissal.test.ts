@@ -507,6 +507,7 @@ describe('fileWatcher dismissal state', () => {
           file,
           projectDir,
           undefined,
+          undefined,
           knownJsonlFiles,
           nextAgentIdRef,
           agents,

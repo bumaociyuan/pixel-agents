@@ -14,7 +14,9 @@
 import { execFile } from 'node:child_process';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import * as path from 'node:path';
 
+import { readConfig } from '../../../configPersistence.js';
 import {
   PI_AGENT_HOOK_EVENTS,
   PI_AGENT_POLL_MS,
@@ -244,13 +246,19 @@ export class PiAgentWatcher {
 
   private sendSessionStart(agent: PiAgentPane): void {
     const label = agent.label ?? agent.tokens?.chat ?? 'pi';
-    this.postToHook({
+    // Look up preferred area from config areaMappings based on cwd basename
+    const preferredArea = findPreferredArea(agent.cwd);
+    const payload: Record<string, unknown> = {
       hook_event_name: PI_AGENT_HOOK_EVENTS.SESSION_START,
       session_id: `pi-agent:${agent.pane_id}`,
       agent_name: label,
       cwd: agent.cwd,
       source: 'herdr',
-    });
+    };
+    if (preferredArea) {
+      payload.preferred_area = preferredArea;
+    }
+    this.postToHook(payload);
   }
 
   private sendSessionEnd(paneId: string, reason: string): void {
@@ -294,4 +302,22 @@ export class PiAgentWatcher {
       session_id: `pi-agent:${agent.pane_id}`,
     });
   }
+}
+
+/** Look up the preferred area label for a project directory from config.
+ *  Returns the first area label mapped to the project's basename, or undefined
+ *  if no mapping exists. */
+function findPreferredArea(cwd: string): string | undefined {
+  try {
+    const config = readConfig();
+    const areaMappings = config.standalone?.areaMappings ?? {};
+    const folderName = path.basename(cwd);
+    const labels = areaMappings[folderName];
+    if (labels && labels.length > 0) {
+      return labels[0];
+    }
+  } catch {
+    // Config read error: silently return undefined
+  }
+  return undefined;
 }

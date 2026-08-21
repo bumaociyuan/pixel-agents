@@ -8,6 +8,10 @@ export interface PendingExternalSession {
   cwd: string;
   /** Optional agent name from the hook event (e.g. pi-agent uses herdr tokens.chat). */
   agentName?: string;
+  /** Preferred area label for seat assignment. Passed from the watcher through
+   *  the hook event chain to guide the webview's findFreeSeat() toward an area's
+   *  chairs. */
+  preferredArea?: string;
 }
 
 /** An event waiting to be dispatched once its agent registers. */
