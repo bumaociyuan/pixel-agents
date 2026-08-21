@@ -506,6 +506,7 @@ describe('fileWatcher dismissal state', () => {
           'workspace-session',
           file,
           projectDir,
+          undefined,
           knownJsonlFiles,
           nextAgentIdRef,
           agents,
