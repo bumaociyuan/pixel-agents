@@ -16,6 +16,7 @@ export const PI_AGENT_HOOK_EVENTS = {
   SESSION_END: 'PiSessionEnd',
   TOOL_START: 'PiToolStart',
   TOOL_END: 'PiToolEnd',
+  TURN_END: 'PiTurnEnd',
   BLOCKED: 'PiBlocked',
 } as const;
 

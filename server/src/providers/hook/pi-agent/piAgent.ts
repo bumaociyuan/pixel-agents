@@ -83,6 +83,12 @@ function normalizeHookEvent(
         event: { kind: 'toolEnd', toolId: 'current' },
       };
 
+    case PI_AGENT_HOOK_EVENTS.TURN_END:
+      return {
+        sessionId,
+        event: { kind: 'turnEnd' },
+      };
+
     case PI_AGENT_HOOK_EVENTS.BLOCKED:
       return {
         sessionId,

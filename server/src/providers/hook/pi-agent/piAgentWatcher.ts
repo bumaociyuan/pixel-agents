@@ -281,11 +281,11 @@ export class PiAgentWatcher {
     });
   }
 
-  /** Send a dummy event to confirm the pending session without creating
-   *  an active tool. Idle agents appear in the office but not at their desks. */
+  /** Send turnEnd to confirm the session and put the agent in waiting state.
+   *  Idle agents appear in the office but wander instead of sitting at desks. */
   private sendConfirm(agent: PiAgentPane): void {
     this.postToHook({
-      hook_event_name: PI_AGENT_HOOK_EVENTS.TOOL_END,
+      hook_event_name: PI_AGENT_HOOK_EVENTS.TURN_END,
       session_id: `pi-agent:${agent.pane_id}`,
     });
   }
