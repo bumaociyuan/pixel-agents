@@ -1,24 +1,32 @@
-/**
- * piCrewFeedWatcher: polls the Crew activity feed (.pi/messenger/feed.jsonl)
- * and dispatches events to the hook endpoint.
- *
- * Self-contained poll loop. The provider starts it in installHooks() and
- * stops it in uninstallHooks(). Each new feed event is translated into a
- * raw hook event and POSTed to the local pixel-agents hook endpoint, so it
- * flows through the normal HookEventHandler pipeline.
- */
+// PiCrewEventWatcher: scans .crew/state/runs/<runId>/events.jsonl for pi-crew
+// (baphuongna) run events and dispatches them to the hook endpoint.
+//
+// Self-contained poll loop. The provider starts it in installHooks() and
+// stops it in uninstallHooks(). Each new event is translated into a raw
+// hook event and POSTed to the local pixel-agents hook endpoint, so it
+// flows through the normal HookEventHandler pipeline.
+//
+// Architecture:
+//   .crew/state/runs/<runId>/events.jsonl --(poll)--> PiCrewEventWatcher
+//                                                       |
+//                                                 POST /api/hooks/pi-crew
+//                                                       |
+//                                                normalizeHookEvent
+//                                                       |
+//                                                  AgentEvent
 
 import * as fs from 'node:fs';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
 
+import { readConfig } from '../../../configPersistence.js';
 import { PI_CREW_FEED_POLL_MS } from './constants.js';
-import type { FeedEvent } from './feedTypes.js';
-import { feedEventToHookPayloads } from './piCrew.js';
+import type { PiCrewEvent, RunEventState } from './feedTypes.js';
+import { piCrewEventToHookPayloads } from './piCrew.js';
 
-export interface FeedWatcherOptions {
-  /** Project directories to watch for feed.jsonl files. */
+export interface EventWatcherOptions {
+  /** Project directories to scan for .crew/state/runs/. */
   projectDirs: string[];
   /** Hook server URL (e.g. http://127.0.0.1:3100). */
   serverUrl: string;
@@ -26,35 +34,23 @@ export interface FeedWatcherOptions {
   authToken: string;
 }
 
-interface FeedFileState {
-  path: string;
-  offset: number;
-  lineBuffer: string;
-}
-
-export class PiCrewFeedWatcher {
+export class PiCrewEventWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
-  private feedStates = new Map<string, FeedFileState>();
-  /** Track task ownership: taskId → agentName. When a new task.start
-   *  arrives for the same taskId, send SessionEnd for the old agent. */
+  /** eventsPath → RunEventState */
+  private runStates = new Map<string, RunEventState>();
+  /** Track task ownership across runs: taskId → agentName */
   private taskOwners = new Map<string, string>();
 
-  constructor(private opts: FeedWatcherOptions) {}
+  constructor(private opts: EventWatcherOptions) {}
 
-  /** Start polling feed.jsonl files in all project directories. */
+  /** Start polling pi-crew event logs. */
   start(): void {
     if (this.interval) return;
     console.log(
-      `[Pixel Agents] pi-crew: starting feed watcher for ${this.opts.projectDirs.length} project(s)`,
+      `[Pixel Agents] pi-crew: starting event watcher for ${this.opts.projectDirs.length} project(s)`,
     );
 
-    // Initialize state for each project dir
-    for (const dir of this.opts.projectDirs) {
-      this.ensureFeedState(dir);
-    }
-
     this.interval = setInterval(() => this.poll(), PI_CREW_FEED_POLL_MS);
-    // Run first poll immediately
     this.poll();
   }
 
@@ -63,63 +59,109 @@ export class PiCrewFeedWatcher {
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
-      console.log('[Pixel Agents] pi-crew: feed watcher stopped');
+      console.log('[Pixel Agents] pi-crew: event watcher stopped');
     }
   }
 
-  /** Check if the watcher is currently running. */
   isRunning(): boolean {
     return this.interval !== null;
   }
 
-  /** Add a new project directory to watch. */
   addProjectDir(dir: string): void {
     if (!this.opts.projectDirs.includes(dir)) {
       this.opts.projectDirs.push(dir);
     }
-    this.ensureFeedState(dir);
   }
 
-  private ensureFeedState(dir: string): void {
-    const feedPath = path.join(dir, '.pi', 'messenger', 'feed.jsonl');
-    if (this.feedStates.has(feedPath)) return;
-
-    // Start from the end of the file — only process NEW events after startup.
-    // Replaying old events would create phantom characters from past sessions.
-    let offset = 0;
-    try {
-      const stat = fs.statSync(feedPath);
-      offset = stat.size;
-    } catch {
-      // File doesn't exist yet — will be picked up on next poll
-    }
-
-    this.feedStates.set(feedPath, { path: feedPath, offset, lineBuffer: '' });
-  }
+  // ── Polling ──────────────────────────────────────────────
 
   private poll(): void {
-    for (const [feedPath, state] of this.feedStates) {
+    for (const dir of this.opts.projectDirs) {
+      this.scanRunsDir(dir);
+    }
+    // Read new events from all tracked event logs
+    for (const [eventsPath, state] of this.runStates) {
       try {
-        this.readFeed(feedPath, state);
+        this.readEvents(eventsPath, state);
       } catch {
-        // Feed file may not exist yet or be temporarily unreadable
+        // Event log may be temporarily unreadable
       }
+    }
+    // Clean up completed runs that have been stale for a while
+    this.pruneCompletedRuns();
+  }
+
+  /** Discover runs by scanning .crew/state/runs/. */
+  private scanRunsDir(projectDir: string): void {
+    const runsDir = path.join(projectDir, '.crew', 'state', 'runs');
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(runsDir, { withFileTypes: true });
+    } catch {
+      return; // No .crew/state/runs/ directory yet
+    }
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const runId = entry.name;
+      const eventsPath = path.join(runsDir, runId, 'events.jsonl');
+
+      if (this.runStates.has(eventsPath)) continue;
+
+      // Start from the beginning for newly discovered runs
+      // We use offset=0 to read all events that have already been written
+      const offset = 0;
+      try {
+        // Verify the file exists (will throw if not)
+        fs.statSync(eventsPath);
+      } catch {
+        // File doesn't exist yet — picked up on next poll
+      }
+
+      const cwd = this.resolveRunCwd(projectDir, runId, runsDir);
+
+      this.runStates.set(eventsPath, {
+        runId,
+        eventsPath,
+        cwd,
+        offset,
+        lineBuffer: '',
+        taskAgents: new Map(),
+        knownAgents: new Set(),
+      });
+
+      console.log(`[Pixel Agents] pi-crew: discovered run ${runId} in ${projectDir}`);
     }
   }
 
-  private readFeed(feedPath: string, state: FeedFileState): void {
+  /** Try to resolve the run's actual working directory from manifest.json. */
+  private resolveRunCwd(projectDir: string, runId: string, runsDir: string): string {
+    try {
+      const manifestPath = path.join(runsDir, runId, 'manifest.json');
+      const raw = fs.readFileSync(manifestPath, 'utf-8');
+      const manifest = JSON.parse(raw) as { cwd?: string };
+      if (manifest.cwd && typeof manifest.cwd === 'string') return manifest.cwd;
+    } catch {
+      // Fall through to projectDir
+    }
+    return projectDir;
+  }
+
+  // ── Event reading ────────────────────────────────────────
+
+  private readEvents(eventsPath: string, state: RunEventState): void {
     let stat: fs.Stats;
     try {
-      stat = fs.statSync(feedPath);
+      stat = fs.statSync(eventsPath);
     } catch {
-      return; // File doesn't exist
+      return;
     }
 
     if (stat.size <= state.offset) return;
 
     const bytesToRead = Math.min(stat.size - state.offset, 64 * 1024);
     const buf = Buffer.alloc(bytesToRead);
-    const fd = fs.openSync(feedPath, 'r');
+    const fd = fs.openSync(eventsPath, 'r');
     fs.readSync(fd, buf, 0, bytesToRead, state.offset);
     fs.closeSync(fd);
     state.offset += bytesToRead;
@@ -131,56 +173,117 @@ export class PiCrewFeedWatcher {
     for (const line of lines) {
       if (!line.trim()) continue;
       try {
-        const event = JSON.parse(line) as FeedEvent;
-        this.dispatchEvent(event, feedPath);
+        const event = JSON.parse(line) as PiCrewEvent;
+        this.dispatchEvent(event, state);
       } catch {
         // Skip malformed lines
       }
     }
   }
 
-  private dispatchEvent(event: FeedEvent, feedPath: string): void {
-    // Extract project dir from feed path: /path/to/project/.pi/messenger/feed.jsonl → /path/to/project
-    const projectDir = path.dirname(path.dirname(path.dirname(feedPath)));
+  // ── Event dispatch ───────────────────────────────────────
 
-    // Event-driven cleanup: when a new worker claims a task, evict the old one.
-    // This handles the case where a worker was killed (Ctrl+C) without writing
-    // a task.reset event.
-    if (event.type === 'task.start' && event.target) {
-      const oldAgent = this.taskOwners.get(event.target);
-      if (oldAgent && oldAgent !== event.agent) {
-        console.log(
-          `[Pixel Agents] pi-crew: task "${event.target}" reassigned from "${oldAgent}" to "${event.agent}", sending SessionEnd for old worker`,
-        );
-        this.postToHook({
-          hook_event_name: 'CrewSessionEnd',
-          session_id: `pi-crew:${oldAgent}`,
-          agent_name: oldAgent,
-          reason: 'replaced',
-        });
-      }
-      this.taskOwners.set(event.target, event.agent);
-    } else if (
-      (event.type === 'task.done' ||
-        event.type === 'task.reset' ||
-        event.type === 'task.approve' ||
-        event.type === 'task.reject') &&
-      event.target
-    ) {
-      this.taskOwners.delete(event.target);
+  private dispatchEvent(event: PiCrewEvent, state: RunEventState): void {
+    const projectDir = state.cwd;
+
+    // Track agent names from task.started events
+    if (event.type === 'task.started' && event.taskId && event.data) {
+      const agentName =
+        (event.data.agent as string) || (event.data.role as string) || `worker-${event.taskId}`;
+      state.taskAgents.set(event.taskId, agentName);
+      state.knownAgents.add(agentName);
     }
 
-    const payloads = feedEventToHookPayloads(event, projectDir);
+    // Handle task ownership transitions for cleanup
+    if (
+      event.type === 'task.completed' ||
+      event.type === 'task.failed' ||
+      event.type === 'task.cancelled'
+    ) {
+      if (event.taskId) {
+        this.taskOwners.delete(event.taskId);
+      }
+    }
+
+    const preferredArea = this.findPreferredArea(projectDir);
+
+    const payloads = piCrewEventToHookPayloads(event, state);
     for (const payload of payloads) {
+      if (preferredArea && payload.hook_event_name === 'CrewSessionStart') {
+        payload.preferred_area = preferredArea;
+      }
       this.postToHook(payload);
     }
+  }
+
+  /** Remove run states for completed runs that haven't been updated recently. */
+  private pruneCompletedRuns(): void {
+    const now = Date.now();
+    const STALE_MS = 5 * 60 * 1000; // 5 minutes
+
+    for (const [eventsPath, state] of this.runStates) {
+      try {
+        const stat = fs.statSync(eventsPath);
+        if (now - stat.mtimeMs < STALE_MS) continue;
+      } catch {
+        continue;
+      }
+
+      // Check if the last event in the log is a terminal event
+      const lastEvent = this.readLastEvent(eventsPath);
+      if (lastEvent && (lastEvent.type === 'run.completed' || lastEvent.type === 'run.failed')) {
+        // Send SessionEnd for all known agents
+        for (const agent of state.knownAgents) {
+          this.postToHook({
+            hook_event_name: 'CrewSessionEnd',
+            session_id: `pi-crew:${agent}`,
+            agent_name: agent,
+            reason: 'run.completed',
+          });
+        }
+        this.runStates.delete(eventsPath);
+        console.log(`[Pixel Agents] pi-crew: pruned completed run ${state.runId}`);
+      }
+    }
+  }
+
+  private readLastEvent(eventsPath: string): PiCrewEvent | null {
+    try {
+      const stat = fs.statSync(eventsPath);
+      if (stat.size === 0) return null;
+      // Read last ~4KB to find the last complete line
+      const tailSize = Math.min(stat.size, 4096);
+      const buf = Buffer.alloc(tailSize);
+      const fd = fs.openSync(eventsPath, 'r');
+      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      fs.closeSync(fd);
+      const lines = buf.toString('utf-8').split('\n').filter(Boolean);
+      if (lines.length === 0) return null;
+      return JSON.parse(lines[lines.length - 1]) as PiCrewEvent;
+    } catch {
+      return null;
+    }
+  }
+
+  // ── Helpers ──────────────────────────────────────────────
+
+  private findPreferredArea(projectDir: string): string | undefined {
+    try {
+      const config = readConfig();
+      const areaMappings = config.standalone?.areaMappings ?? {};
+      const folderName = path.basename(projectDir);
+      const labels = areaMappings[folderName];
+      if (labels && labels.length > 0) return labels[0];
+    } catch {
+      // Silently return undefined
+    }
+    return undefined;
   }
 
   private postToHook(payload: Record<string, unknown>): void {
     const body = JSON.stringify(payload);
     const url = new URL(`/api/hooks/${encodeURIComponent('pi-crew')}`, this.opts.serverUrl);
 
-    // Use http.request for fire-and-forget — we don't need the response
     const transport = url.protocol === 'https:' ? https : http;
     const req = transport.request(
       {
@@ -195,7 +298,6 @@ export class PiCrewFeedWatcher {
         },
       },
       (res: import('node:http').IncomingMessage) => {
-        // Drain response to free the socket
         res.resume();
         if (res.statusCode !== 200 && res.statusCode !== 204) {
           console.log(`[Pixel Agents] pi-crew: hook POST returned ${res.statusCode}`);

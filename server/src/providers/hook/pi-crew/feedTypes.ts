@@ -1,46 +1,63 @@
 /**
- * Types for pi-messenger Crew feed events.
+ * Types for pi-crew (baphuongna) run events.
  *
- * Mirrors the FeedEvent type from pi-messenger/feed.ts. Kept separate so
- * this provider has zero runtime dependency on pi-messenger — it only reads
- * the JSONL file on disk.
+ * Mirrors the TeamEvent format from pi-crew's event-log.ts.
+ * Kept separate so this provider has zero runtime dependency on pi-crew —
+ * it only reads the JSONL files on disk.
  */
 
-export type FeedEventType =
-  | 'join'
-  | 'leave'
-  | 'reserve'
-  | 'release'
-  | 'message'
-  | 'commit'
-  | 'test'
-  | 'edit'
-  | 'task.start'
-  | 'task.done'
-  | 'task.review'
-  | 'task.block'
-  | 'task.unblock'
-  | 'task.reset'
-  | 'task.delete'
-  | 'task.split'
-  | 'task.revise'
-  | 'task.revise-tree'
-  | 'task.approve'
-  | 'task.reject'
-  | 'plan.start'
-  | 'plan.pass.start'
-  | 'plan.pass.done'
-  | 'plan.review.start'
-  | 'plan.review.done'
-  | 'plan.done'
-  | 'plan.cancel'
-  | 'plan.failed'
-  | 'stuck';
+/** pi-crew event types we care about for pixel-agent visualization. */
+export type PiCrewEventType =
+  // Run lifecycle
+  | 'run.created'
+  | 'run.completed'
+  | 'run.failed'
+  // Task lifecycle
+  | 'task.started'
+  | 'task.completed'
+  | 'task.failed'
+  | 'task.needs_attention'
+  | 'task.cancelled'
+  | 'task.progress'
+  | 'task.attention'
+  | 'task.parallel_start'
+  | 'task.parallel_end'
+  // Worker lifecycle
+  | 'worker.spawned'
+  | 'worker.exit'
+  | 'worker.close'
+  | 'worker.cancelled'
+  | 'worker.spawn_error'
+  | 'worker.response_timeout'
+  | 'worker.final_drain'
+  | 'worker.hard_kill';
 
-export interface FeedEvent {
-  ts: string;
-  agent: string;
-  type: FeedEventType;
-  target?: string;
-  preview?: string;
+/** A single event from pi-crew's events.jsonl. */
+export interface PiCrewEvent {
+  time: string;
+  type: PiCrewEventType | string;
+  runId: string;
+  taskId?: string;
+  message?: string;
+  data?: Record<string, unknown>;
+  metadata?: {
+    seq?: number;
+    provenance?: string;
+    fingerprint?: string;
+    parentEventId?: string;
+    attemptId?: string;
+  };
+}
+
+/** Internal state for tracking a single run's event log. */
+export interface RunEventState {
+  runId: string;
+  eventsPath: string;
+  cwd: string;
+  offset: number;
+  lineBuffer: string;
+  /** Known task → agent mapping for this run. */
+  taskAgents: Map<string, string>;
+  /** Known agent names from this run. */
+  knownAgents: Set<string>;
 }

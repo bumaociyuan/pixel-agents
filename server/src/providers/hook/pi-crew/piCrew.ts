@@ -1,24 +1,26 @@
 /**
- * piCrewProvider: HookProvider for pi-messenger Crew.
+ * piCrewProvider: HookProvider for pi-crew (baphuongna).
  *
- * Maps Crew activity feed events (feed.jsonl) to Pixel Agents AgentEvents
- * so that Crew workers, the planner, and the reviewer appear as pixel-art
+ * Maps pi-crew run events (events.jsonl) to Pixel Agents AgentEvents
+ * so that pi-crew workers, the planner, and reviewers appear as pixel-art
  * characters in the office.
  *
  * Architecture:
- *   feed.jsonl ──(poll)──→ PiCrewFeedWatcher ──(POST)──→ /api/hooks/pi-crew
- *                                                              ↓
- *                                                     normalizeHookEvent
- *                                                              ↓
- *                                                        AgentEvent
- *                                                              ↓
- *                                                     HookEventHandler
- *                                                              ↓
- *                                                      AgentStateStore
- *                                                              ↓
- *                                                         Canvas
+ *   .crew/state/runs/<runId>/events.jsonl ──(poll)──→ PiCrewEventWatcher
+ *                                                          ↓
+ *                                                   POST /api/hooks/pi-crew
+ *                                                          ↓
+ *                                                  normalizeHookEvent
+ *                                                          ↓
+ *                                                     AgentEvent
+ *                                                          ↓
+ *                                                  HookEventHandler
+ *                                                          ↓
+ *                                                   AgentStateStore
+ *                                                          ↓
+ *                                                      Canvas
  *
- * The feed watcher is started in installHooks() and stopped in uninstallHooks().
+ * The event watcher is started in installHooks() and stopped in uninstallHooks().
  * Events flow through the standard HTTP hook pipeline so the runtime needs zero
  * changes to support this provider.
  */
@@ -31,57 +33,145 @@ import {
   PI_CREW_PROVIDER_ID,
   PI_CREW_TOOL_NAMES,
 } from './constants.js';
-import type { FeedEvent } from './feedTypes.js';
-import { PiCrewFeedWatcher } from './piCrewFeedWatcher.js';
+import type { PiCrewEvent, RunEventState } from './feedTypes.js';
+import { PiCrewEventWatcher } from './piCrewFeedWatcher.js';
 
 // ── State ────────────────────────────────────────────────────
 
-let feedWatcher: PiCrewFeedWatcher | null = null;
+let eventWatcher: PiCrewEventWatcher | null = null;
 
 // ── Event Mapping ────────────────────────────────────────────
 
 /**
- * Map a feed event to one or more raw hook payloads.
- * A single feed event can produce multiple hook events (e.g. task.start
- * triggers both a sessionStart and a toolStart).
+ * Map a pi-crew event to one or more raw hook payloads.
+ *
+ * Event → pixel-agent mapping strategy:
+ *   task.started    → SessionStart + ToolStart (new character appears, sits at desk)
+ *   task.completed  → ToolEnd + SessionEnd (character finishes, leaves)
+ *   task.failed     → permissionRequest (blocked bubble)
+ *   task.progress   → progress (update activity label)
+ *   task.attention  → permissionRequest (needs attention bubble)
+ *   task.cancelled  → SessionEnd (character removed)
+ *   worker.spawned  → (informational, no character change)
+ *   worker.exit     → (informational unless task already ended)
+ *   run.created     → SessionStart for planner
+ *   run.completed   → SessionEnd for all agents
+ *   run.failed      → SessionEnd for all agents
  */
-export function feedEventToHookPayloads(
-  event: FeedEvent,
-  projectDir: string,
+export function piCrewEventToHookPayloads(
+  event: PiCrewEvent,
+  state: RunEventState,
 ): Record<string, unknown>[] {
-  const agentName = event.agent || 'unknown';
-  const sessionId = `pi-crew:${agentName}`;
-  const now = Date.now();
-
   switch (event.type) {
-    case 'task.start': {
-      const taskId = event.target || '';
-      const taskTitle = event.preview || taskId;
+    // ── Run lifecycle ──
+
+    case 'run.created': {
+      const plannerName = 'crew-planner';
+      const plannerSid = `pi-crew:${plannerName}`;
       return [
-        // Ensure the agent's session exists
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_START,
-          session_id: sessionId,
-          agent_name: agentName,
-          source: 'task.start',
-          cwd: projectDir,
+          session_id: plannerSid,
+          agent_name: plannerName,
+          source: 'run.created',
+          cwd: state.cwd,
         },
-        // Start the task tool
         {
-          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_START,
-          session_id: sessionId,
-          agent_name: agentName,
-          tool_name: PI_CREW_TOOL_NAMES.TASK,
-          tool_id: `crew-task-${taskId}-${now}`,
-          tool_input: { task_id: taskId, description: taskTitle },
-          task_id: taskId,
-          task_title: taskTitle,
+          hook_event_name: PI_CREW_HOOK_EVENTS.PLAN_START,
+          session_id: plannerSid,
+          agent_name: plannerName,
+          tool_name: PI_CREW_TOOL_NAMES.PLAN,
+          tool_id: `crew-plan-${event.runId}`,
+          tool_input: {
+            description: event.message || 'Planning pi-crew run',
+            runId: event.runId,
+          },
         },
       ];
     }
 
-    case 'task.done': {
-      const taskId = event.target || '';
+    case 'run.completed':
+    case 'run.failed': {
+      const payloads: Record<string, unknown>[] = [];
+      // End planner session
+      payloads.push({
+        hook_event_name: PI_CREW_HOOK_EVENTS.PLAN_DONE,
+        session_id: 'pi-crew:crew-planner',
+        agent_name: 'crew-planner',
+        tool_id: `crew-plan-${event.runId}`,
+      });
+      payloads.push({
+        hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+        session_id: 'pi-crew:crew-planner',
+        agent_name: 'crew-planner',
+        reason: event.type,
+      });
+      // End all worker sessions
+      for (const agentName of state.knownAgents) {
+        if (agentName === 'crew-planner') continue;
+        payloads.push({
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: `pi-crew:${agentName}`,
+          agent_name: agentName,
+          reason: event.type,
+        });
+      }
+      return payloads;
+    }
+
+    // ── Task lifecycle ──
+
+    case 'task.started': {
+      const role = (event.data?.role as string) || 'worker';
+      const agentName = (event.data?.agent as string) || role;
+      const taskId = event.taskId || 'unknown';
+      const sessionId = `pi-crew:${agentName}`;
+      const taskDesc =
+        (event.message as string) || (event.data?.description as string) || `Task ${taskId}`;
+
+      const payloads: Record<string, unknown>[] = [];
+
+      // Only create SessionStart if this agent wasn't already introduced
+      // by task.parallel_start (single-task dispatch path)
+      if (!state.knownAgents.has(agentName)) {
+        state.knownAgents.add(agentName);
+        state.taskAgents.set(taskId, agentName);
+        payloads.push({
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_START,
+          session_id: sessionId,
+          agent_name: agentName,
+          source: 'task.started',
+          cwd: event.data?.cwd || state.cwd,
+          role: role,
+          taskId: taskId,
+          runId: event.runId,
+        });
+      }
+
+      // Start the task tool (character sits at desk)
+      payloads.push({
+        hook_event_name: PI_CREW_HOOK_EVENTS.TASK_START,
+        session_id: sessionId,
+        agent_name: agentName,
+        tool_name: roleToToolName(role),
+        tool_id: `crew-task-${taskId}`,
+        tool_input: {
+          task_id: taskId,
+          description: taskDesc,
+          role: role,
+          runId: event.runId,
+        },
+        task_id: taskId,
+        task_title: taskDesc,
+      });
+
+      return payloads;
+    }
+
+    case 'task.completed': {
+      const taskId = event.taskId || '';
+      const agentName = state.taskAgents.get(taskId) || `worker-${taskId}`;
+      const sessionId = `pi-crew:${agentName}`;
       return [
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.TASK_DONE,
@@ -89,183 +179,171 @@ export function feedEventToHookPayloads(
           agent_name: agentName,
           tool_id: `crew-task-${taskId}`,
           task_id: taskId,
-          task_title: event.preview || '',
+          task_title: event.message || '',
         },
-        // Remove the worker character after task completes
+        // Remove the worker character
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
           session_id: sessionId,
           agent_name: agentName,
-          reason: 'task.done',
+          reason: 'task.completed',
         },
       ];
     }
 
-    case 'task.block': {
-      const taskId = event.target || '';
+    case 'task.failed': {
+      const taskId = event.taskId || '';
+      const agentName = state.taskAgents.get(taskId) || `worker-${taskId}`;
+      const sessionId = `pi-crew:${agentName}`;
       return [
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.TASK_BLOCK,
           session_id: sessionId,
           agent_name: agentName,
           task_id: taskId,
-          task_title: event.preview || '',
+          task_title: event.message || event.data?.error || 'Task failed',
         },
-      ];
-    }
-
-    case 'task.unblock': {
-      return [
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_UNBLOCK,
-          session_id: sessionId,
-          agent_name: agentName,
-        },
-      ];
-    }
-
-    case 'plan.start': {
-      return [
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_START,
-          session_id: `pi-crew:crew-planner`,
-          agent_name: 'crew-planner',
-          source: 'plan.start',
-          cwd: projectDir,
-        },
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.PLAN_START,
-          session_id: `pi-crew:crew-planner`,
-          agent_name: 'crew-planner',
-          tool_name: PI_CREW_TOOL_NAMES.PLAN,
-          tool_id: `crew-plan-${now}`,
-          tool_input: { description: event.preview || 'Planning' },
-        },
-      ];
-    }
-
-    case 'plan.done': {
-      return [
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.PLAN_DONE,
-          session_id: `pi-crew:crew-planner`,
-          agent_name: 'crew-planner',
-          tool_id: 'crew-plan',
-        },
-        // Remove the planner character after planning completes
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
-          session_id: `pi-crew:crew-planner`,
-          agent_name: 'crew-planner',
-          reason: 'plan.done',
+          session_id: sessionId,
+          agent_name: agentName,
+          reason: 'task.failed',
         },
       ];
     }
 
-    case 'plan.pass.start':
-    case 'plan.pass.done':
-    case 'plan.review.start':
-    case 'plan.review.done': {
+    case 'task.needs_attention': {
+      const taskId = event.taskId || '';
+      const agentName = state.taskAgents.get(taskId) || `worker-${taskId}`;
+      const sessionId = `pi-crew:${agentName}`;
+      return [
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_BLOCK,
+          session_id: sessionId,
+          agent_name: agentName,
+          task_id: taskId,
+          task_title: 'Needs attention',
+        },
+      ];
+    }
+
+    case 'task.cancelled': {
+      const taskId = event.taskId || '';
+      const agentName = state.taskAgents.get(taskId) || `worker-${taskId}`;
+      return [
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: `pi-crew:${agentName}`,
+          agent_name: agentName,
+          reason: 'task.cancelled',
+        },
+      ];
+    }
+
+    case 'task.progress': {
+      const taskId = event.taskId || (event.data?.taskId as string) || '';
+      const agentName = state.taskAgents.get(taskId) || `worker-${taskId}`;
       return [
         {
           hook_event_name: PI_CREW_HOOK_EVENTS.PROGRESS,
-          session_id: `pi-crew:crew-planner`,
-          agent_name: 'crew-planner',
-          tool_id: 'crew-plan',
-          data: { type: event.type, preview: event.preview },
+          session_id: `pi-crew:${agentName}`,
+          agent_name: agentName,
+          tool_id: `crew-task-${taskId}`,
+          data: {
+            eventType: event.data?.eventType,
+            activityState: event.data?.activityState,
+            toolCount: event.data?.toolCount,
+            turns: event.data?.turns,
+            tokens: event.data?.tokens,
+          },
         },
       ];
     }
 
-    case 'task.review': {
+    case 'task.attention': {
+      const taskId = event.taskId || '';
+      const agentName = state.taskAgents.get(taskId) || `worker-${taskId}`;
       return [
         {
+          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_BLOCK,
+          session_id: `pi-crew:${agentName}`,
+          agent_name: agentName,
+          task_id: taskId,
+          task_title: (event.data?.reason as string) || 'Attention needed',
+        },
+      ];
+    }
+
+    case 'task.parallel_start': {
+      // Characters appear but don't sit yet — task.started will make them sit
+      const taskIds = (event.data?.taskIds as string[]) || [];
+      const roles = (event.data?.roles as string[]) || [];
+      const payloads: Record<string, unknown>[] = [];
+      for (let i = 0; i < taskIds.length; i++) {
+        const tid = taskIds[i];
+        const role = roles[i] || 'worker';
+        const agentName = role;
+        const sid = `pi-crew:${agentName}`;
+        state.taskAgents.set(tid, agentName);
+        state.knownAgents.add(agentName);
+        // SessionStart only — character appears, task.started adds ToolStart
+        payloads.push({
           hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_START,
-          session_id: `pi-crew:crew-reviewer`,
-          agent_name: 'crew-reviewer',
-          source: 'task.review',
-          cwd: projectDir,
-        },
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_START,
-          session_id: `pi-crew:crew-reviewer`,
-          agent_name: 'crew-reviewer',
-          tool_name: PI_CREW_TOOL_NAMES.REVIEW,
-          tool_id: `crew-review-${now}`,
-          tool_input: { task_id: event.target, description: event.preview },
-        },
-      ];
-    }
-
-    case 'task.reset': {
-      return [
-        // Remove the worker character when task is reset (worker departed)
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
-          session_id: sessionId,
+          session_id: sid,
           agent_name: agentName,
-          reason: 'task.reset',
-        },
-      ];
+          source: 'task.parallel_start',
+          cwd: state.cwd,
+          role: role,
+          taskId: tid,
+          runId: event.runId,
+        });
+      }
+      return payloads;
     }
 
-    case 'task.approve':
-    case 'task.reject': {
-      // Approve/reject ends the review. Clean up the reviewer.
-      const reviewerSid = 'pi-crew:crew-reviewer';
-      return [
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_DONE,
-          session_id: reviewerSid,
-          agent_name: 'crew-reviewer',
-          tool_id: 'crew-review',
-        },
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
-          session_id: reviewerSid,
-          agent_name: 'crew-reviewer',
-          reason: event.type,
-        },
-      ];
+    // ── Worker lifecycle (informational) ──
+
+    case 'worker.spawned': {
+      // Worker process spawned — informational only, character already created
+      // by task.started or task.parallel_start
+      return [];
     }
 
-    case 'task.split':
-    case 'task.revise':
-    case 'task.revise-tree': {
-      return [
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.PROGRESS,
-          session_id: sessionId,
-          agent_name: agentName,
-          data: { type: event.type, preview: event.preview, target: event.target },
-        },
-      ];
-    }
+    case 'worker.exit':
+    case 'worker.close':
+    case 'worker.cancelled':
+    case 'worker.spawn_error':
+    case 'worker.response_timeout':
+    case 'worker.final_drain':
+    case 'worker.hard_kill':
+      // Worker lifecycle events — informational, character lifecycle managed
+      // by task.{completed,failed,cancelled}
+      return [];
 
-    case 'plan.cancel':
-    case 'plan.failed': {
-      return [
-        {
-          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
-          session_id: `pi-crew:crew-planner`,
-          agent_name: 'crew-planner',
-          reason: event.type,
-        },
-      ];
-    }
-
-    // Non-Crew events (join, leave, message, etc.) — silently skip
     default:
       return [];
   }
 }
 
+// ── Role → Tool Name Mapping ─────────────────────────────────
+
+function roleToToolName(role: string): string {
+  switch (role) {
+    case 'planner':
+      return PI_CREW_TOOL_NAMES.PLAN;
+    case 'reviewer':
+    case 'security-reviewer':
+    case 'code-reviewer':
+    case 'quality-reviewer':
+    case 'cold-verifier':
+      return PI_CREW_TOOL_NAMES.REVIEW;
+    default:
+      return PI_CREW_TOOL_NAMES.TASK;
+  }
+}
+
 // ── normalizeHookEvent ───────────────────────────────────────
 
-/**
- * Translate a pi-crew raw hook event into a normalized AgentEvent.
- * The raw events come from the feed watcher POSTing to the hook endpoint.
- */
 function normalizeHookEvent(
   raw: Record<string, unknown>,
 ): { sessionId: string; event: AgentEvent } | null {
@@ -281,6 +359,7 @@ function normalizeHookEvent(
           kind: 'sessionStart',
           source: typeof raw.source === 'string' ? raw.source : undefined,
           cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
+          preferredArea: typeof raw.preferred_area === 'string' ? raw.preferred_area : undefined,
         },
       };
 
@@ -326,7 +405,6 @@ function normalizeHookEvent(
       };
 
     case PI_CREW_HOOK_EVENTS.TASK_UNBLOCK:
-      // Unblock is informational — clear the permission state
       return {
         sessionId,
         event: { kind: 'turnEnd' },
@@ -377,48 +455,46 @@ function formatToolStatus(toolName: string, input?: unknown): string {
   switch (toolName) {
     case PI_CREW_TOOL_NAMES.TASK: {
       const desc = typeof inp.description === 'string' ? inp.description : '';
-      return desc ? `Crew: ${desc}` : 'Working on Crew task';
+      const role = typeof inp.role === 'string' ? ` [${inp.role}]` : '';
+      return desc ? `pi-crew: ${desc}${role}` : 'Working on pi-crew task';
     }
     case PI_CREW_TOOL_NAMES.PLAN:
-      return 'Planning Crew tasks';
+      return 'Planning pi-crew tasks';
     case PI_CREW_TOOL_NAMES.REVIEW:
-      return 'Reviewing Crew task';
+      return 'Reviewing pi-crew task';
     default:
-      return `Crew: ${toolName}`;
+      return `pi-crew: ${toolName}`;
   }
 }
 
 // ── Installer wrappers ───────────────────────────────────────
 
 async function installHooks(serverUrl: string, authToken: string): Promise<void> {
-  // Discover project directories from the current workspace. We use the
-  // server's working directory as the single project dir for now.
-  // In VS Code, the adapter would pass workspace folders.
   const projectDirs = [process.cwd()];
 
-  if (feedWatcher) {
-    feedWatcher.stop();
+  if (eventWatcher) {
+    eventWatcher.stop();
   }
 
-  feedWatcher = new PiCrewFeedWatcher({
+  eventWatcher = new PiCrewEventWatcher({
     projectDirs,
     serverUrl,
     authToken,
   });
-  feedWatcher.start();
-  console.log('[Pixel Agents] pi-crew: hooks installed, feed watcher started');
+  eventWatcher.start();
+  console.log('[Pixel Agents] pi-crew: hooks installed, event watcher started');
 }
 
 async function uninstallHooks(): Promise<void> {
-  if (feedWatcher) {
-    feedWatcher.stop();
-    feedWatcher = null;
-    console.log('[Pixel Agents] pi-crew: hooks uninstalled, feed watcher stopped');
+  if (eventWatcher) {
+    eventWatcher.stop();
+    eventWatcher = null;
+    console.log('[Pixel Agents] pi-crew: hooks uninstalled, event watcher stopped');
   }
 }
 
 function areHooksInstalled(): Promise<boolean> {
-  return Promise.resolve(feedWatcher?.isRunning() ?? false);
+  return Promise.resolve(eventWatcher?.isRunning() ?? false);
 }
 
 function consentDisclosure(): { headline: string; disclosure: string } {
@@ -447,9 +523,5 @@ export const piCrewProvider: HookProvider = {
   permissionExemptTools: new Set([PI_CREW_TOOL_NAMES.PLAN, PI_CREW_TOOL_NAMES.REVIEW]),
   subagentToolNames: new Set(),
   readingTools: new Set([PI_CREW_TOOL_NAMES.REVIEW]),
-  // No terminal integration — Crew agents are virtual
   terminalNamePrefix: undefined,
-
-  // No file fallback — feed watching is handled by the internal watcher
-  // (no getSessionDirs, no sessionFilePattern, no parseTranscriptLine, no buildLaunchCommand)
 };

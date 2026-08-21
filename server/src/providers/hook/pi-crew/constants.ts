@@ -1,10 +1,10 @@
-/** pi-messenger Crew provider constants. */
+/** pi-crew (baphuongna) provider constants. */
 
 /** Provider id used in the registry and hook endpoint. */
 export const PI_CREW_PROVIDER_ID = 'pi-crew';
 
 /** Display name shown in the UI. */
-export const PI_CREW_DISPLAY_NAME = 'pi-messenger Crew';
+export const PI_CREW_DISPLAY_NAME = 'pi-crew';
 
 /** Poll interval (ms) for the feed.jsonl watcher. Crew events are less
  *  frequent than Claude tool calls, so a slower poll is fine. */
@@ -15,7 +15,7 @@ export const PI_CREW_FEED_POLL_MS = 2000;
 export const PI_CREW_FEED_INITIAL_TAIL_BYTES = 32768;
 
 /** Hook event names used in the raw event payloads POSTed to the hook endpoint.
- *  These are the pi-crew equivalents of Claude's PreToolUse, Stop, etc. */
+ *  These are the pi-crew (baphuongna) equivalents of Claude's PreToolUse, Stop, etc. */
 export const PI_CREW_HOOK_EVENTS = {
   SESSION_START: 'CrewSessionStart',
   SESSION_END: 'CrewSessionEnd',
@@ -28,7 +28,7 @@ export const PI_CREW_HOOK_EVENTS = {
   PROGRESS: 'CrewProgress',
 } as const;
 
-/** Tool names reported to the office for Crew agent activities. */
+/** Tool names reported to the office for pi-crew agent activities. */
 export const PI_CREW_TOOL_NAMES = {
   TASK: 'CrewTask',
   PLAN: 'CrewPlan',
