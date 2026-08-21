@@ -13,7 +13,7 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
 
-import { PI_CREW_FEED_INITIAL_TAIL_BYTES, PI_CREW_FEED_POLL_MS } from './constants.js';
+import { PI_CREW_FEED_POLL_MS } from './constants.js';
 import type { FeedEvent } from './feedTypes.js';
 import { feedEventToHookPayloads } from './piCrew.js';
 
@@ -84,11 +84,12 @@ export class PiCrewFeedWatcher {
     const feedPath = path.join(dir, '.pi', 'messenger', 'feed.jsonl');
     if (this.feedStates.has(feedPath)) return;
 
-    // Start reading from near the end so we don't replay history
+    // Start from the end of the file — only process NEW events after startup.
+    // Replaying old events would create phantom characters from past sessions.
     let offset = 0;
     try {
       const stat = fs.statSync(feedPath);
-      offset = Math.max(0, stat.size - PI_CREW_FEED_INITIAL_TAIL_BYTES);
+      offset = stat.size;
     } catch {
       // File doesn't exist yet — will be picked up on next poll
     }
