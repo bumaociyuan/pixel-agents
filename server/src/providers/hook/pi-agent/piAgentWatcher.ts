@@ -141,10 +141,11 @@ export class PiAgentWatcher {
       if (!known) {
         this.sendSessionStart(pane);
         // Always send toolStart to confirm the pending session.
-        // For idle/blocked agents, immediately follow with toolEnd.
+        // For idle agents, delay toolEnd so it arrives after toolStart
+        // has confirmed the session and created the agent.
         this.sendToolStart(pane);
         if (pane.agent_status !== 'working') {
-          this.sendToolEnd(pane);
+          setTimeout(() => this.sendToolEnd(pane), 1000);
         }
         if (pane.agent_status === 'blocked') {
           this.sendBlocked(pane);
