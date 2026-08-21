@@ -1577,6 +1577,9 @@ export function startStaleExternalAgentCheck(
 
     for (const [id, agent] of agents) {
       if (!agent.isExternal) continue;
+      // Hooks-only agents (pi-crew, pi-agent) have no JSONL file — they are
+      // managed by their provider's watcher, not the stale check.
+      if (agent.hooksOnly) continue;
 
       // Only despawn if the JSONL file has been deleted from disk.
       // Inactive external agents stay alive so they can resume when
