@@ -169,6 +169,9 @@ export class PiAgentWatcher {
   }
 
   private handleTransition(oldState: PiAgentPane, newState: PiAgentPane): void {
+    console.log(
+      `[Pixel Agents] pi-agent: transition ${newState.pane_id}: ${oldState.agent_status} → ${newState.agent_status}`,
+    );
     if (oldState.agent_status === 'idle' && newState.agent_status === 'working') {
       this.sendToolStart(newState);
     }
@@ -181,6 +184,7 @@ export class PiAgentWatcher {
         newState.pane_id,
         setTimeout(() => {
           this.pendingToolEnds.delete(newState.pane_id);
+          console.log(`[Pixel Agents] pi-agent: debounced toolEnd for ${newState.pane_id}`);
           this.sendToolEnd(agent);
         }, PI_AGENT_TOOL_END_DEBOUNCE_MS),
       );
@@ -191,6 +195,7 @@ export class PiAgentWatcher {
       if (pending) {
         clearTimeout(pending);
         this.pendingToolEnds.delete(newState.pane_id);
+        console.log(`[Pixel Agents] pi-agent: cancelled pending toolEnd for ${newState.pane_id}`);
       }
     }
     if (newState.agent_status === 'blocked') {
