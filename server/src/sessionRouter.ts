@@ -6,6 +6,8 @@ export interface PendingExternalSession {
   /** Transcript file path. Undefined for providers without transcripts (OpenCode, Copilot). */
   transcriptPath: string | undefined;
   cwd: string;
+  /** Optional agent name from the hook event (e.g. pi-agent uses herdr tokens.chat). */
+  agentName?: string;
 }
 
 /** An event waiting to be dispatched once its agent registers. */

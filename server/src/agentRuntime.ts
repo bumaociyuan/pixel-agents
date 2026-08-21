@@ -154,7 +154,7 @@ export class AgentRuntime {
 
     // Wire hook lifecycle callbacks to shared agent operations
     this.hookEventHandler.setLifecycleCallbacks({
-      onExternalSessionDetected: (sessionId, transcriptPath, cwd) => {
+      onExternalSessionDetected: (sessionId, transcriptPath, cwd, hookAgentName) => {
         const projectDir = transcriptPath ? path.dirname(transcriptPath) : cwd;
         // Teammate session of a tracked lead? Attach it as a teammate character
         // instead of adopting a generic external agent -- and regardless of the
@@ -207,6 +207,7 @@ export class AgentRuntime {
           sessionId,
           transcriptPath,
           cwd,
+          hookAgentName,
           this.knownJsonlFiles,
           this.store.nextAgentId,
           this.store,

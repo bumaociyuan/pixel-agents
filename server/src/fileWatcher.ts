@@ -1060,6 +1060,7 @@ export function adoptExternalSessionFromHook(
   sessionId: string,
   transcriptPath: string | undefined,
   cwd: string,
+  hookAgentName: string | undefined,
   knownJsonlFiles: Set<string>,
   nextAgentIdRef: { current: number },
   agents: AgentStateStore,
@@ -1116,8 +1117,9 @@ export function adoptExternalSessionFromHook(
     // Hooks-only provider (OpenCode, Copilot, pi-crew): no transcript file, all state from hooks
     const id = nextAgentIdRef.current++;
     const folderName = folderNameResolver?.({ cwd }) ?? (cwd ? path.basename(cwd) : undefined);
-    // Extract agent name from session_id: "pi-crew:crew-planner" → "crew-planner"
-    const agentName = sessionId.includes(':') ? sessionId.split(':').pop() : undefined;
+    // Extract agent name: prefer hook-provided name, fall back to session_id suffix
+    const agentName =
+      hookAgentName ?? (sessionId.includes(':') ? sessionId.split(':').pop() : undefined);
     const agent: AgentState = {
       id,
       sessionId,
