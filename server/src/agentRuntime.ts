@@ -193,7 +193,10 @@ export class AgentRuntime {
             }
           }
         }
-        if (!isTrackedProjectDir(projectDir) && !this.watchAllSessions.current) {
+        // pi-crew and pi-agent sessions are always adopted — the watcher is
+        // the explicit opt-in, and they don't need a Claude agent track.
+        const isPiProvider = sessionId.startsWith('pi-crew:') || sessionId.startsWith('pi-agent:');
+        if (!isPiProvider && !isTrackedProjectDir(projectDir) && !this.watchAllSessions.current) {
           console.log(
             `[Pixel Agents] Hook: external session ${sessionId.slice(0, 8)}... not adopted ` +
               `(project untracked, Watch All Sessions off)`,

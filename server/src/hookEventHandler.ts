@@ -262,9 +262,9 @@ export class HookEventHandler {
           cwd: cwd ?? '',
         });
       } else if (debug && tracked)
-          console.log(
-            `[Pixel Agents] Hook: SessionStart -> unknown session ${sid}..., no transcript_path`,
-          );
+        console.log(
+          `[Pixel Agents] Hook: SessionStart -> unknown session ${sid}..., no transcript_path`,
+        );
       return;
     }
 
@@ -343,14 +343,16 @@ export class HookEventHandler {
       case 'sessionEnd':
         return this.handleSessionEnd(normEvent, agent, agentId);
       case 'toolStart':
-        return this.handlePreToolUse(normEvent, agent, agentId);
+        return this.handlePreToolUse(normEvent, agent, agentId, provider);
       case 'toolEnd':
         // Both PostToolUse and PostToolUseFailure normalize to toolEnd. Distinguishing
         // them inside handlers would require extra info; the existing behavior was
         // identical for both (agentToolDone + clear currentHookToolId), so one branch suffices.
         return this.handlePostToolUse(agent, agentId);
       case 'subagentStart':
-        return this.defaultProvider.team ? this.handleSubagentStart(event, agent, agentId) : undefined;
+        return this.defaultProvider.team
+          ? this.handleSubagentStart(event, agent, agentId)
+          : undefined;
       case 'subagentEnd':
         return this.defaultProvider.team ? this.handleSubagentStop(agent, agentId) : undefined;
       case 'permissionRequest':
@@ -427,10 +429,11 @@ export class HookEventHandler {
     normEvent: Extract<AgentEvent, { kind: 'toolStart' }>,
     agent: AgentState,
     agentId: number,
+    provider: HookProvider,
   ): void {
     const toolName = normEvent.toolName;
     const toolInput = (normEvent.input as Record<string, unknown> | undefined) ?? {};
-    const status = this.defaultProvider.formatToolStatus(toolName, toolInput);
+    const status = provider.formatToolStatus(toolName, toolInput);
     const hookToolId = `hook-${Date.now()}`;
 
     // Track for PostToolUse/SubagentStart correlation (always, even if suppressed below).
@@ -439,7 +442,7 @@ export class HookEventHandler {
     agent.currentHookToolId = hookToolId;
     agent.currentHookToolName = toolName;
     agent.currentHookIsTeammateSpawn =
-      this.defaultProvider.team?.isTeammateSpawnCall(toolName, toolInput) ?? false;
+      provider.team?.isTeammateSpawnCall(toolName, toolInput) ?? false;
 
     // When a lead has inline teammates, hook tool events are ambiguous (could be
     // from the lead or any teammate -- they share session_id). Suppress hook-originated
@@ -466,6 +469,12 @@ export class HookEventHandler {
         toolName,
       });
     }
+    // Track in activeToolStatuses/Names so resendAgentActivity can replay
+    // state on client reconnect. Hooks-only agents (pi-agent, pi-crew) have
+    // no JSONL pipeline and rely on this for persistence across reconnects.
+    agent.activeToolStatuses.set(hookToolId, status);
+    agent.activeToolNames.set(hookToolId, toolName);
+    agent.activeToolIds.add(hookToolId);
     this.agents.broadcast({
       type: 'agentStatus',
       id: agentId,
@@ -488,6 +497,10 @@ export class HookEventHandler {
           toolId: agent.currentHookToolId,
         });
       }
+      // Clean up active tool tracking (added by handlePreToolUse for reconnect replay)
+      agent.activeToolStatuses.delete(agent.currentHookToolId);
+      agent.activeToolNames.delete(agent.currentHookToolId);
+      agent.activeToolIds.delete(agent.currentHookToolId);
       agent.currentHookToolId = undefined;
       agent.currentHookToolName = undefined;
     }

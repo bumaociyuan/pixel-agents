@@ -27,7 +27,14 @@ import {
 } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
-import { claudeProvider, copyHookScript, hookProviderById, hookProviders, piCrewProvider } from './providers/index.js';
+import {
+  claudeProvider,
+  copyHookScript,
+  hookProviderById,
+  hookProviders,
+  piAgentProvider,
+  piCrewProvider,
+} from './providers/index.js';
 import { PixelAgentsServer } from './server.js';
 
 // ── Argument parsing ──────────────────────────────────────────
@@ -288,7 +295,21 @@ async function main(): Promise<void> {
         await piCrewProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
         console.log('[Pixel Agents] pi-crew: hooks installed');
       } catch (err) {
-        console.error(`[Pixel Agents] pi-crew: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(
+          `[Pixel Agents] pi-crew: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    // ── pi-agent: auto-install herdr watcher on startup ──
+    if (getHooksEnabled(piAgentProvider.id) && getHooksConsent(piAgentProvider.id) === 'granted') {
+      try {
+        await piAgentProvider.installHooks(`http://127.0.0.1:${config.port}`, config.token);
+        console.log('[Pixel Agents] pi-agent: hooks installed');
+      } catch (err) {
+        console.error(
+          `[Pixel Agents] pi-agent: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
     }
 

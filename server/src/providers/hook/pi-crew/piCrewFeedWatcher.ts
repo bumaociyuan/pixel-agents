@@ -159,7 +159,13 @@ export class PiCrewFeedWatcher {
         });
       }
       this.taskOwners.set(event.target, event.agent);
-    } else if ((event.type === 'task.done' || event.type === 'task.reset') && event.target) {
+    } else if (
+      (event.type === 'task.done' ||
+        event.type === 'task.reset' ||
+        event.type === 'task.approve' ||
+        event.type === 'task.reject') &&
+      event.target
+    ) {
       this.taskOwners.delete(event.target);
     }
 
@@ -191,9 +197,7 @@ export class PiCrewFeedWatcher {
         // Drain response to free the socket
         res.resume();
         if (res.statusCode !== 200 && res.statusCode !== 204) {
-          console.log(
-            `[Pixel Agents] pi-crew: hook POST returned ${res.statusCode}`,
-          );
+          console.log(`[Pixel Agents] pi-crew: hook POST returned ${res.statusCode}`);
         }
       },
     );

@@ -24,10 +24,7 @@
  */
 
 import type { AgentEvent, HookProvider } from '../../../../../core/src/provider.js';
-import {
-  PI_CREW_CONSENT_DISCLOSURE,
-  PI_CREW_CONSENT_HEADLINE,
-} from './consentCopy.js';
+import { PI_CREW_CONSENT_DISCLOSURE, PI_CREW_CONSENT_HEADLINE } from './consentCopy.js';
 import {
   PI_CREW_DISPLAY_NAME,
   PI_CREW_HOOK_EVENTS,
@@ -213,7 +210,25 @@ export function feedEventToHookPayloads(
     }
 
     case 'task.approve':
-    case 'task.reject':
+    case 'task.reject': {
+      // Approve/reject ends the review. Clean up the reviewer.
+      const reviewerSid = 'pi-crew:crew-reviewer';
+      return [
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.TASK_DONE,
+          session_id: reviewerSid,
+          agent_name: 'crew-reviewer',
+          tool_id: 'crew-review',
+        },
+        {
+          hook_event_name: PI_CREW_HOOK_EVENTS.SESSION_END,
+          session_id: reviewerSid,
+          agent_name: 'crew-reviewer',
+          reason: event.type,
+        },
+      ];
+    }
+
     case 'task.split':
     case 'task.revise':
     case 'task.revise-tree': {
@@ -334,7 +349,10 @@ function normalizeHookEvent(
     case PI_CREW_HOOK_EVENTS.PLAN_DONE:
       return {
         sessionId,
-        event: { kind: 'toolEnd', toolId: typeof raw.tool_id === 'string' ? raw.tool_id : 'current' },
+        event: {
+          kind: 'toolEnd',
+          toolId: typeof raw.tool_id === 'string' ? raw.tool_id : 'current',
+        },
       };
 
     case PI_CREW_HOOK_EVENTS.PROGRESS:

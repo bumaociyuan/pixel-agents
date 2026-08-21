@@ -50,6 +50,8 @@ import {
   copyHookScript,
   hookProviderById,
   hookProviders,
+  piAgentProvider,
+  piCrewProvider,
 } from '../../server/src/providers/index.js';
 import { PixelAgentsServer } from '../../server/src/server.js';
 import {
@@ -230,6 +232,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         if (hooksEnabled) {
           void this.installHooksIfConsented(config.port, config.token);
         }
+        // Auto-start pi-crew and pi-agent watchers if consented
+        void this.startPiProviderWatchers(config.port, config.token);
         console.log(`[Pixel Agents] Server: ready on port ${config.port}`);
       })
       .catch((e) => {
@@ -377,6 +381,22 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     // itself no longer sends an optimistic status (its other caller,
     // setHooksEnabled, re-derives on its own).
     await this.reportHooksStatus(claudeProvider);
+  }
+
+  /** Auto-start pi-crew and pi-agent watchers if consent was previously granted. */
+  private async startPiProviderWatchers(port: number, token: string): Promise<void> {
+    for (const provider of [piCrewProvider, piAgentProvider]) {
+      if (getHooksEnabled(provider.id) && getHooksConsent(provider.id) === 'granted') {
+        try {
+          await provider.installHooks(`http://127.0.0.1:${port}`, token);
+          console.log(`[Pixel Agents] ${provider.id}: hooks installed`);
+        } catch (err) {
+          console.error(
+            `[Pixel Agents] ${provider.id}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+    }
   }
 
   /** This surface's half of carrying out a consent answer for one provider. The choice→action rule and the write
