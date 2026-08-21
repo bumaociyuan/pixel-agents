@@ -153,8 +153,8 @@ export function readConfig(): PixelAgentsConfig {
   try {
     if (!fs.existsSync(filePath)) {
       return {
-        vscode: { ...DEFAULT_ADAPTER_SETTINGS },
-        standalone: { ...DEFAULT_ADAPTER_SETTINGS },
+        vscode: { ...DEFAULT_ADAPTER_SETTINGS, areaMappings: {} },
+        standalone: { ...DEFAULT_ADAPTER_SETTINGS, areaMappings: {} },
         externalAssetDirectories: [],
         hooksConsent: {},
         hooksEnabled: {},

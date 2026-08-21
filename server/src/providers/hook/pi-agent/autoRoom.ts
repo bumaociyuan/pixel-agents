@@ -20,7 +20,30 @@ export function autoCreateRoomForProject(projectDir: string): void {
     const areaMappings = (stand.areaMappings as Record<string, string[]> | undefined) ?? {};
 
     const label = path.basename(projectDir);
-    if (areaMappings[projectDir]?.includes(label)) return;
+    const existingLabel = areaMappings[label];
+    if (existingLabel?.includes(label)) return;
+
+    // Migrate old full-path keys to basename keys
+    let migrated = false;
+    for (const key of Object.keys(areaMappings)) {
+      if (key.includes(path.sep) || key.includes('/')) {
+        const baseKey = path.basename(key);
+        // Only migrate if the basename key doesn't already exist (to avoid overwriting)
+        if (!areaMappings[baseKey]) {
+          areaMappings[baseKey] = areaMappings[key];
+        }
+        delete areaMappings[key];
+        migrated = true;
+      }
+    }
+
+    // If migration happened, persist the cleaned config immediately
+    if (migrated) {
+      stand.areaMappings = areaMappings;
+      config.standalone = stand;
+      writeConfig(config);
+      console.log('[Pixel Agents] auto-room: migrated areaMappings keys from full paths to basenames');
+    }
 
     // Add area definition to layout
     const layout = readLayoutFromFile();
@@ -35,10 +58,10 @@ export function autoCreateRoomForProject(projectDir: string): void {
     }
 
     // Map folder to area
-    const mapped = areaMappings[projectDir] ?? [];
+    const mapped = areaMappings[label] ?? [];
     if (!mapped.includes(label)) {
       mapped.push(label);
-      areaMappings[projectDir] = mapped;
+      areaMappings[label] = mapped;
       stand.areaMappings = areaMappings;
       config.standalone = stand;
       writeConfig(config);
