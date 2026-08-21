@@ -140,15 +140,16 @@ export class PiAgentWatcher {
 
       if (!known) {
         this.sendSessionStart(pane);
-        // Always send toolStart to confirm the pending session.
-        // For idle agents, delay toolEnd so it arrives after toolStart
-        // has confirmed the session and created the agent.
-        this.sendToolStart(pane);
-        if (pane.agent_status !== 'working') {
-          setTimeout(() => this.sendToolEnd(pane), 1000);
-        }
-        if (pane.agent_status === 'blocked') {
-          this.sendBlocked(pane);
+        if (pane.agent_status === 'working') {
+          // Working agents: show tool activity at desk
+          this.sendToolStart(pane);
+        } else {
+          // Idle/blocked agents: confirm session with a dummy event
+          // so they appear but NOT at their desks (no active tool)
+          this.sendConfirm(pane);
+          if (pane.agent_status === 'blocked') {
+            this.sendBlocked(pane);
+          }
         }
       } else if (known.agent_status !== pane.agent_status) {
         this.handleTransition(known, pane);
@@ -276,6 +277,15 @@ export class PiAgentWatcher {
   private sendBlocked(agent: PiAgentPane): void {
     this.postToHook({
       hook_event_name: PI_AGENT_HOOK_EVENTS.BLOCKED,
+      session_id: `pi-agent:${agent.pane_id}`,
+    });
+  }
+
+  /** Send a dummy event to confirm the pending session without creating
+   *  an active tool. Idle agents appear in the office but not at their desks. */
+  private sendConfirm(agent: PiAgentPane): void {
+    this.postToHook({
+      hook_event_name: PI_AGENT_HOOK_EVENTS.TOOL_END,
       session_id: `pi-agent:${agent.pane_id}`,
     });
   }
