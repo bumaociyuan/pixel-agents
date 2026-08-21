@@ -72,12 +72,16 @@ export function parseArgs(argv: string[]): CliArgs {
     } else if (argv[i] === '--host' && argv[i + 1]) {
       args.host = argv[i + 1];
       i++;
+    } else if (argv[i] === '--version' || argv[i] === '-v') {
+      console.log(process.env.PIXEL_AGENTS_VERSION ?? 'unknown');
+      process.exit(0);
     } else if (argv[i] === '--help') {
       console.log(`Usage: pixel-agents [options]
 
 Options:
   --port, -p <number>   Port to listen on (default: OS-assigned ephemeral port)
   --host <string>       Host to bind to (default: 127.0.0.1)
+  --version, -v         Print version and exit
   --help                Show this help message`);
       process.exit(0);
     }
