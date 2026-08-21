@@ -98,8 +98,10 @@ function normalizeHookEvent(
 
 function formatToolStatus(_toolName: string, input?: unknown): string {
   const inp = (input ?? {}) as Record<string, unknown>;
-  const desc = typeof inp.description === 'string' ? inp.description : '';
-  return desc || 'Working in Pi';
+  const desc = typeof inp.description === 'string' && inp.description.length > 0 ? inp.description : '';
+  // Truncate long descriptions for display
+  if (desc.length > 50) return desc.slice(0, 47) + '\u2026';
+  return desc || 'Working';
 }
 
 // ── Installer wrappers ───────────────────────────────────────
