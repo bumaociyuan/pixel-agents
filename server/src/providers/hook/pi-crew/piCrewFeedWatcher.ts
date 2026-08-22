@@ -23,9 +23,11 @@ import * as path from 'node:path';
 import { createProjectScope } from '../../../../../core/src/projectScope.js';
 import { readConfig } from '../../../configPersistence.js';
 import { PI_CREW_FEED_POLL_MS } from './constants.js';
-import type { PiCrewEvent, RunEventState } from './feedTypes.js';
+import type { PiCrewEvent } from './feedTypes.js';
+import { IncrementalJsonlReader } from './jsonlReader.js';
 import { piCrewEventToHookPayloads } from './piCrew.js';
-import { createRunLifecycle } from './piCrewLifecycle.js';
+import { PiCrewCheckpointStore } from './piCrewCheckpointStore.js';
+import { createRunLifecycle, type RunLifecycleState } from './piCrewLifecycle.js';
 
 export interface EventWatcherOptions {
   /** Project directories to scan for .crew/state/runs/. */
@@ -36,16 +38,39 @@ export interface EventWatcherOptions {
   authToken: string;
   /** Called when a new project directory is discovered (auto-room creation). */
   onNewProject?: (projectDir: string) => void;
+  /** Durable Pixel Agents state, injected by tests or an embedding host. */
+  checkpointStore?: PiCrewCheckpointStore;
+  /**
+   * Temporary confirmation seam until Task 5's durable outbox exists. Return true only after every
+   * payload from the source event is durably accepted; fire-and-forget HTTP has no confirmation and
+   * therefore cannot advance a checkpoint.
+   */
+  onEventDeliveryConfirmed?: (
+    event: PiCrewEvent,
+    payloads: readonly Record<string, unknown>[],
+  ) => boolean;
+}
+
+interface WatchedRunState {
+  runId: string;
+  eventsPath: string;
+  cwd: string;
+  projectKey: string;
+  reader: IncrementalJsonlReader<PiCrewEvent>;
+  lifecycle: RunLifecycleState;
 }
 
 export class PiCrewEventWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
-  /** eventsPath → RunEventState */
-  private runStates = new Map<string, RunEventState>();
+  /** eventsPath → independent reader and lifecycle state. */
+  private runStates = new Map<string, WatchedRunState>();
   /** Known project directories (for new-project detection). */
   private knownProjects = new Set<string>();
+  private readonly checkpointStore: PiCrewCheckpointStore;
 
-  constructor(private opts: EventWatcherOptions) {}
+  constructor(private opts: EventWatcherOptions) {
+    this.checkpointStore = opts.checkpointStore ?? new PiCrewCheckpointStore();
+  }
 
   /** Start polling pi-crew event logs. */
   start(): void {
@@ -119,25 +144,37 @@ export class PiCrewEventWatcher {
 
       if (this.runStates.has(eventsPath)) continue;
 
-      // Start from the beginning for newly discovered runs
-      // We use offset=0 to read all events that have already been written
-      const offset = 0;
       try {
         // Verify the file exists (will throw if not)
         fs.statSync(eventsPath);
       } catch {
         // File doesn't exist yet — picked up on next poll
+        continue;
       }
 
       const cwd = this.resolveRunCwd(projectDir, runId, runsDir);
+      const project = createProjectScope(cwd);
+      const checkpoint = this.checkpointStore.load(project.key, runId);
+      const reader = new IncrementalJsonlReader<PiCrewEvent>(eventsPath, {
+        checkpoint: checkpoint ?? undefined,
+      });
+
+      if (!checkpoint) {
+        const records = reader.readAvailable();
+        const lastRecord = records.at(-1);
+        if (lastRecord && isTerminalRunEvent(lastRecord.value)) {
+          reader.commit(lastRecord.endOffset);
+          this.checkpointStore.save(project.key, runId, reader.snapshot());
+        }
+      }
 
       this.runStates.set(eventsPath, {
         runId,
         eventsPath,
         cwd,
-        offset,
-        lineBuffer: '',
-        lifecycle: createRunLifecycle(createProjectScope(cwd), runId, cwd),
+        projectKey: project.key,
+        reader,
+        lifecycle: createRunLifecycle(project, runId, cwd),
       });
 
       console.log(`[Pixel Agents] pi-crew: discovered run ${runId} in ${projectDir}`);
@@ -159,41 +196,19 @@ export class PiCrewEventWatcher {
 
   // ── Event reading ────────────────────────────────────────
 
-  private readEvents(eventsPath: string, state: RunEventState): void {
-    let stat: fs.Stats;
-    try {
-      stat = fs.statSync(eventsPath);
-    } catch {
-      return;
-    }
+  private readEvents(_eventsPath: string, state: WatchedRunState): void {
+    for (const record of state.reader.readAvailable()) {
+      const payloads = this.dispatchEvent(record.value, state);
+      if (this.opts.onEventDeliveryConfirmed?.(record.value, payloads) !== true) continue;
 
-    if (stat.size <= state.offset) return;
-
-    const bytesToRead = Math.min(stat.size - state.offset, 64 * 1024);
-    const buf = Buffer.alloc(bytesToRead);
-    const fd = fs.openSync(eventsPath, 'r');
-    fs.readSync(fd, buf, 0, bytesToRead, state.offset);
-    fs.closeSync(fd);
-    state.offset += bytesToRead;
-
-    const text = state.lineBuffer + buf.toString('utf-8');
-    const lines = text.split('\n');
-    state.lineBuffer = lines.pop() || '';
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const event = JSON.parse(line) as PiCrewEvent;
-        this.dispatchEvent(event, state);
-      } catch {
-        // Skip malformed lines
-      }
+      state.reader.commit(record.endOffset);
+      this.checkpointStore.save(state.projectKey, state.runId, state.reader.snapshot());
     }
   }
 
   // ── Event dispatch ───────────────────────────────────────
 
-  private dispatchEvent(event: PiCrewEvent, state: RunEventState): void {
+  private dispatchEvent(event: PiCrewEvent, state: WatchedRunState): Record<string, unknown>[] {
     const projectDir = state.cwd;
 
     const preferredArea = this.findPreferredArea(projectDir);
@@ -205,6 +220,7 @@ export class PiCrewEventWatcher {
       }
       this.postToHook(payload);
     }
+    return payloads;
   }
 
   /** Remove run states for completed runs that haven't been updated recently. */
@@ -222,12 +238,7 @@ export class PiCrewEventWatcher {
 
       // Check if the last event in the log is a terminal event
       const lastEvent = this.readLastEvent(eventsPath);
-      if (
-        lastEvent &&
-        (lastEvent.type === 'run.completed' ||
-          lastEvent.type === 'run.failed' ||
-          lastEvent.type === 'run.cancelled')
-      ) {
+      if (lastEvent && isTerminalRunEvent(lastEvent)) {
         this.runStates.delete(eventsPath);
         console.log(`[Pixel Agents] pi-crew: pruned completed run ${state.runId}`);
       }
@@ -235,21 +246,9 @@ export class PiCrewEventWatcher {
   }
 
   private readLastEvent(eventsPath: string): PiCrewEvent | null {
-    try {
-      const stat = fs.statSync(eventsPath);
-      if (stat.size === 0) return null;
-      // Read last ~4KB to find the last complete line
-      const tailSize = Math.min(stat.size, 4096);
-      const buf = Buffer.alloc(tailSize);
-      const fd = fs.openSync(eventsPath, 'r');
-      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
-      fs.closeSync(fd);
-      const lines = buf.toString('utf-8').split('\n').filter(Boolean);
-      if (lines.length === 0) return null;
-      return JSON.parse(lines[lines.length - 1]) as PiCrewEvent;
-    } catch {
-      return null;
-    }
+    return (
+      new IncrementalJsonlReader<PiCrewEvent>(eventsPath).readAvailable().at(-1)?.value ?? null
+    );
   }
 
   // ── Helpers ──────────────────────────────────────────────
@@ -297,4 +296,10 @@ export class PiCrewEventWatcher {
     req.write(body);
     req.end();
   }
+}
+
+function isTerminalRunEvent(event: PiCrewEvent): boolean {
+  return (
+    event.type === 'run.completed' || event.type === 'run.failed' || event.type === 'run.cancelled'
+  );
 }

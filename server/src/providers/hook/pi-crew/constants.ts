@@ -10,6 +10,12 @@ export const PI_CREW_DISPLAY_NAME = 'pi-crew';
  *  frequent than Claude tool calls, so a slower poll is fine. */
 export const PI_CREW_FEED_POLL_MS = 2000;
 
+/** State subdirectory below Pixel Agents' local state root for durable pi-crew reads. */
+export const PI_CREW_CHECKPOINTS_DIR = 'pi-crew/checkpoints';
+
+/** Number of source event IDs retained to suppress replays after file recovery. */
+export const PI_CREW_RECENT_EVENT_IDS_MAX = 512;
+
 /** How far back to read feed.jsonl on first poll (bytes from end of file).
  *  Enough to catch the last few events without replaying the whole history. */
 export const PI_CREW_FEED_INITIAL_TAIL_BYTES = 32768;
