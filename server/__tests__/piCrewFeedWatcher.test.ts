@@ -207,6 +207,45 @@ describe('PiCrewEventWatcher', () => {
     watcher.stop();
   });
 
+  it('retries a terminal startup checkpoint save without replaying its history', () => {
+    const { eventsPath } = writeRun(tempDir, 'terminal-save-retry', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'terminal-save-retry' },
+      { time: '2026-08-22T00:00:01.000Z', type: 'run.completed', runId: 'terminal-save-retry' },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const originalSave = store.save.bind(store);
+    let failSave = true;
+    (store as unknown as { save: typeof store.save }).save = (...args) => {
+      if (failSave) throw new Error('terminal checkpoint disk full');
+      originalSave(...args);
+    };
+    const diagnostics: string[] = [];
+    const captured: Record<string, unknown>[] = [];
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      checkpointStore: store,
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+    (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook =
+      (payload) => captured.push(payload);
+
+    expect(() => watcher.start()).not.toThrow();
+    expect(captured).toEqual([]);
+    expect(store.load(createProjectScope(tempDir).key, 'terminal-save-retry')).toBeNull();
+    expect(diagnostics.join('\n')).toContain('terminal checkpoint disk full');
+
+    failSave = false;
+    (watcher as unknown as { poll: () => void }).poll();
+
+    expect(
+      store.load(createProjectScope(tempDir).key, 'terminal-save-retry')?.committedOffset,
+    ).toBe(fs.statSync(eventsPath).size);
+    expect(captured).toEqual([]);
+    watcher.stop();
+  });
+
   it('resumes only records after a stored checkpoint', () => {
     const captured: Record<string, unknown>[] = [];
     const { eventsPath } = writeRun(tempDir, 'resumed-run', [

@@ -62,6 +62,7 @@ interface WatchedRunState {
   projectKey: string;
   reader: IncrementalJsonlReader<PiCrewEvent>;
   lifecycle: RunLifecycleState;
+  pendingTerminalOffset?: number;
 }
 
 export class PiCrewEventWatcher {
@@ -180,14 +181,22 @@ export class PiCrewEventWatcher {
           isTerminalRunEvent(lastRecord.value) &&
           !reader.hasUncertainTrailingData()
         ) {
-          reader.commit(lastRecord.endOffset);
-          this.checkpointStore.save(project.key, runId, reader.snapshot());
+          state = {
+            runId,
+            eventsPath,
+            cwd,
+            project,
+            projectKey: project.key,
+            reader,
+            lifecycle: createRunLifecycle(project, runId, cwd),
+            pendingTerminalOffset: lastRecord.endOffset,
+          };
         } else if (lastRecord && isTerminalRunEvent(lastRecord.value)) {
           this.onDiagnostic(`terminal history has malformed or partial tail: ${eventsPath}`);
         }
       }
 
-      state = {
+      state ??= {
         runId,
         eventsPath,
         cwd,
@@ -218,6 +227,25 @@ export class PiCrewEventWatcher {
   // ── Event reading ────────────────────────────────────────
 
   private readEvents(_eventsPath: string, state: WatchedRunState): void {
+    if (state.pendingTerminalOffset !== undefined) {
+      const checkpoint = state.reader.prepareCommit(state.pendingTerminalOffset);
+      if (!checkpoint) {
+        this.onDiagnostic(`cannot prepare terminal checkpoint for ${state.eventsPath}`);
+        return;
+      }
+      try {
+        this.checkpointStore.save(state.projectKey, state.runId, checkpoint);
+      } catch (error) {
+        this.onDiagnostic(
+          `cannot save terminal checkpoint for ${state.eventsPath}: ${errorMessage(error)}`,
+        );
+        return;
+      }
+      state.reader.finalizeCommit(checkpoint);
+      state.pendingTerminalOffset = undefined;
+      return;
+    }
+
     for (const record of state.reader.readAvailable()) {
       const eventId = sourceEventId(record.value);
       if (state.reader.hasRecentEventId(eventId)) {
