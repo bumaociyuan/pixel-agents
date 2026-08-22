@@ -3,7 +3,7 @@
  * in the office when a new project directory is discovered by the pi-agent watcher.
  *
  * Three responsibilities:
- *   1. Migrate old full-path areaMappings keys to basename keys (on startup).
+ *   1. Migrate legacy Area mappings into stable project keys.
  *   2. Create area definitions in the layout (label + color).
  *   3. Assign unassigned chairs to the new area (update layout.areaTiles).
  *   4. Persist areaMappings to BOTH standalone and vscode namespaces so the
@@ -12,7 +12,17 @@
 
 import * as path from 'node:path';
 
-import { readConfig, writeConfig } from '../../../configPersistence.js';
+import {
+  canonicalizeProjectPath,
+  createProjectScope,
+  type ProjectScope,
+} from '../../../../../core/src/projectScope.js';
+import {
+  type ConfigNamespace,
+  type ProjectAreaConfigV2,
+  readConfig,
+  writeConfig,
+} from '../../../configPersistence.js';
 import { readLayoutFromFile, writeLayoutToFile } from '../../../layoutPersistence.js';
 import { AUTO_ROOM_COLORS } from './constants.js';
 
@@ -23,50 +33,73 @@ const CHAIR_TYPE_PREFIXES = ['WOODEN_CHAIR', 'CHAIR', 'SOFA', 'COUCH', 'STOOL'];
 
 /** Run on server startup to migrate old config and ensure areaTiles are populated.
  *  Safe to call multiple times — checks for existing entries before acting. */
-export function migrateAutoRoomConfig(): void {
+export function migrateAutoRoomConfig(scopes: readonly ProjectScope[] = []): void {
   try {
-    const config = readConfig();
-    let changed = false;
-
-    // Migrate BOTH namespaces: standalone and vscode
-    for (const ns of ['standalone', 'vscode'] as const) {
-      const nsConfig = config[ns] ?? {};
-      const areaMappings = (nsConfig.areaMappings as Record<string, string[]> | undefined) ?? {};
-      const migrated = migrateFullPathKeys(areaMappings);
-      if (migrated) {
-        nsConfig.areaMappings = areaMappings;
-        config[ns] = nsConfig;
-        changed = true;
-      }
-    }
-
-    if (changed) {
-      writeConfig(config);
-      console.log(
-        '[Pixel Agents] auto-room: migrated areaMappings keys from full paths to basenames',
-      );
-    }
+    migrateProjectAreas(scopes);
   } catch (err) {
     console.error('[Pixel Agents] auto-room: migration error:', err);
   }
 }
 
-/** Convert full-path keys to basename keys in-place. Returns true if any key was migrated. */
-function migrateFullPathKeys(areaMappings: Record<string, string[]>): boolean {
-  let migrated = false;
-  for (const key of Object.keys(areaMappings)) {
-    if (key.includes(path.sep) || key.includes('/')) {
-      const baseKey = path.basename(key);
-      if (baseKey && baseKey !== key) {
-        if (!areaMappings[baseKey]) {
-          areaMappings[baseKey] = areaMappings[key];
-        }
-        delete areaMappings[key];
-        migrated = true;
+/** Copy legacy adapter mappings into the versioned, stable-key mapping without mutating legacy input. */
+export function migrateProjectAreas(scopes: readonly ProjectScope[]): ProjectAreaConfigV2 {
+  const config = readConfig();
+  let changed = false;
+
+  for (const namespace of ['standalone', 'vscode'] as const) {
+    for (const [legacyKey, labels] of Object.entries(config[namespace].areaMappings)) {
+      const matches = legacyMappingTargets(legacyKey, scopes);
+      if (matches.length === 0) continue;
+      if (matches.length > 1) {
+        console.warn(
+          `[Pixel Agents] auto-room: ambiguous legacy project-area mapping "${legacyKey}" copied to ${matches.length} projects`,
+        );
+      }
+      for (const scope of matches) {
+        changed = mergeProjectAreaLabels(config.projectAreas, scope.key, labels) || changed;
       }
     }
   }
-  return migrated;
+
+  if (changed) writeConfig(config);
+  return config.projectAreas;
+}
+
+/** Return v2 labels first, then legacy keys in the deterministic compatibility order. */
+export function getProjectAreaLabels(scope: ProjectScope, namespace: ConfigNamespace): string[] {
+  const config = readConfig();
+  const mapped = config.projectAreas.mappings[scope.key];
+  if (mapped) return [...mapped];
+
+  const legacy = config[namespace].areaMappings;
+  for (const key of [scope.path, scope.displayName, path.basename(scope.path)]) {
+    if (legacy[key]) return [...legacy[key]];
+  }
+  return [];
+}
+
+/** Bind one stable project identity to an Area label; new writes always target v2 only. */
+export function ensureProjectArea(
+  scope: ProjectScope,
+  namespace: ConfigNamespace,
+): { areaLabel: string; changed: boolean } {
+  const config = readConfig();
+  const existing = config.projectAreas.mappings[scope.key];
+  if (existing?.length) return { areaLabel: existing[0]!, changed: false };
+
+  const legacyLabels = getLegacyProjectAreaLabels(config, scope, namespace);
+  const preferred = legacyLabels[0] ?? scope.displayName;
+  const claimedByAnotherProject = Object.entries(config.projectAreas.mappings).some(
+    ([projectKey, labels]) => projectKey !== scope.key && labels.includes(preferred),
+  );
+  const areaLabel = claimedByAnotherProject
+    ? `${scope.displayName} · ${scope.key.slice(-6)}`
+    : preferred;
+  const labels = legacyLabels.length ? [...legacyLabels] : [areaLabel];
+  if (labels[0] !== areaLabel) labels.unshift(areaLabel);
+  config.projectAreas.mappings[scope.key] = uniqueLabels(labels);
+  writeConfig(config);
+  return { areaLabel, changed: true };
 }
 
 /** Create an area for a newly discovered project directory.
@@ -87,30 +120,10 @@ function migrateFullPathKeys(areaMappings: Record<string, string[]>): boolean {
  */
 export function autoCreateRoomForProject(projectDir: string): void {
   try {
-    let config = readConfig();
-    const label = path.basename(projectDir);
-
-    // Ensure areaMappings are migrated first
-    let migrated = false;
-    for (const ns of ['standalone', 'vscode'] as const) {
-      const nsConfig = config[ns] ?? {};
-      const areaMappings = (nsConfig.areaMappings as Record<string, string[]> | undefined) ?? {};
-      if (migrateFullPathKeys(areaMappings)) {
-        nsConfig.areaMappings = areaMappings;
-        config[ns] = nsConfig;
-        migrated = true;
-      }
-    }
-    if (migrated) {
-      writeConfig(config);
-      // Re-read so subsequent checks see the clean state
-      config = readConfig();
-    }
-
-    // Skip if already mapped (after migration)
-    const stand = config.standalone ?? {};
-    const standMappings = (stand.areaMappings as Record<string, string[]>) ?? {};
-    if (standMappings[label]?.includes(label)) return;
+    const scope = createProjectScope(projectDir);
+    migrateProjectAreas([scope]);
+    const { areaLabel: label, changed } = ensureProjectArea(scope, 'standalone');
+    if (!changed) return;
 
     // ── 1. Add area definition to layout (if layout file exists) ──
     const layout = readLayoutFromFile();
@@ -134,23 +147,59 @@ export function autoCreateRoomForProject(projectDir: string): void {
       console.log(`[Pixel Agents] auto-room: no layout file to modify, skipping area tiles`);
     }
 
-    // ── 3. Persist mappings to BOTH namespaces ──
-    for (const ns of ['standalone', 'vscode'] as const) {
-      const nsConfig = config[ns] ?? {};
-      const nsMappings = (nsConfig.areaMappings as Record<string, string[]>) ?? {};
-      const mapped = nsMappings[label] ?? [];
-      if (!mapped.includes(label)) {
-        mapped.push(label);
-        nsMappings[label] = mapped;
-        nsConfig.areaMappings = nsMappings;
-        config[ns] = nsConfig;
-      }
-    }
-    writeConfig(config);
-    console.log(`[Pixel Agents] auto-room: mapped "${label}" in standalone + vscode`);
+    console.log(`[Pixel Agents] auto-room: mapped "${label}" for ${scope.key}`);
   } catch (err) {
     console.error('[Pixel Agents] auto-room: error:', err);
   }
+}
+
+function legacyMappingTargets(legacyKey: string, scopes: readonly ProjectScope[]): ProjectScope[] {
+  const byKey = scopes.filter((scope) => scope.key === legacyKey);
+  if (byKey.length) return byKey;
+  if (isPathLike(legacyKey)) {
+    const canonical = canonicalizeProjectPath(legacyKey);
+    return scopes.filter((scope) => scope.path === canonical);
+  }
+  const byDisplayName = scopes.filter((scope) => scope.displayName === legacyKey);
+  if (byDisplayName.length) return byDisplayName;
+  return scopes.filter((scope) => path.basename(scope.path) === legacyKey);
+}
+
+function getLegacyProjectAreaLabels(
+  config: ReturnType<typeof readConfig>,
+  scope: ProjectScope,
+  namespace: ConfigNamespace,
+): string[] {
+  const legacy = config[namespace].areaMappings;
+  for (const key of [scope.path, scope.displayName, path.basename(scope.path)]) {
+    if (legacy[key]) return [...legacy[key]];
+  }
+  return [];
+}
+
+function mergeProjectAreaLabels(
+  projectAreas: ProjectAreaConfigV2,
+  projectKey: string,
+  labels: readonly string[],
+): boolean {
+  const current = projectAreas.mappings[projectKey] ?? [];
+  const merged = uniqueLabels([...current, ...labels]);
+  if (
+    merged.length === current.length &&
+    merged.every((label, index) => label === current[index])
+  ) {
+    return false;
+  }
+  projectAreas.mappings[projectKey] = merged;
+  return true;
+}
+
+function uniqueLabels(labels: readonly string[]): string[] {
+  return [...new Set(labels.filter((label) => label.length > 0))];
+}
+
+function isPathLike(key: string): boolean {
+  return key.includes('/') || key.includes(path.sep);
 }
 
 /** Find unassigned chairs and assign them to the given area label.

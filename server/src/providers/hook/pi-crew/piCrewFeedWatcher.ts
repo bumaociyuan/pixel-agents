@@ -25,6 +25,7 @@ import {
   type ProjectScope,
 } from '../../../../../core/src/projectScope.js';
 import { readConfig } from '../../../configPersistence.js';
+import { getProjectAreaLabels } from '../pi-agent/autoRoom.js';
 import { PI_CREW_FEED_POLL_MS, PI_CREW_HOOK_DRAIN_TIMEOUT_MS } from './constants.js';
 import type { PiCrewEvent } from './feedTypes.js';
 import { type HookDeliveryResult, HookOutbox, type HookOutboxLike } from './hookOutbox.js';
@@ -63,6 +64,7 @@ interface WatchedRunState {
   outbox: HookOutboxLike;
   processing: boolean;
   enqueueSafe: boolean;
+  projectAreaLabels: string[];
   pendingTerminalOffset?: number;
 }
 
@@ -75,6 +77,8 @@ export class PiCrewEventWatcher {
   private readonly processingTasks = new Set<Promise<void>>();
   private readonly unsafeEnqueueStates = new Set<WatchedRunState>();
   private readonly safePointWaiters = new Set<() => void>();
+  private readonly projectAreaLabelCache = new Map<string, string[]>();
+  private projectAreaConfigSignature = '';
   /** Known project identities (for new-project detection). */
   private knownProjects = new Set<string>();
   private projectScopes: ProjectScope[];
@@ -229,6 +233,7 @@ export class PiCrewEventWatcher {
             outbox: this.createOutbox(runId),
             processing: false,
             enqueueSafe: true,
+            projectAreaLabels: this.resolveProjectAreaLabels(project),
             pendingTerminalOffset: lastRecord.endOffset,
           };
         } else if (lastRecord && isTerminalRunEvent(lastRecord.value)) {
@@ -247,6 +252,7 @@ export class PiCrewEventWatcher {
         outbox: this.createOutbox(runId),
         processing: false,
         enqueueSafe: true,
+        projectAreaLabels: this.resolveProjectAreaLabels(project),
       };
       this.runStates.set(eventsPath, state);
 
@@ -355,9 +361,8 @@ export class PiCrewEventWatcher {
     state: WatchedRunState,
     lifecycle: RunLifecycleState,
   ): Record<string, unknown>[] {
-    const projectDir = state.cwd;
-
-    const preferredArea = this.findPreferredArea(projectDir);
+    state.projectAreaLabels = this.resolveProjectAreaLabels(state.project);
+    const preferredArea = state.projectAreaLabels[0];
 
     const payloads = piCrewEventToHookPayloads(event, lifecycle);
     for (const payload of payloads) {
@@ -401,17 +406,23 @@ export class PiCrewEventWatcher {
 
   // ── Helpers ──────────────────────────────────────────────
 
-  private findPreferredArea(projectDir: string): string | undefined {
+  private resolveProjectAreaLabels(project: ProjectScope): string[] {
     try {
       const config = readConfig();
-      const areaMappings = config.standalone?.areaMappings ?? {};
-      const folderName = path.basename(projectDir);
-      const labels = areaMappings[folderName];
-      if (labels && labels.length > 0) return labels[0];
+      const signature = JSON.stringify([config.projectAreas, config.standalone.areaMappings]);
+      if (signature !== this.projectAreaConfigSignature) {
+        this.projectAreaConfigSignature = signature;
+        this.projectAreaLabelCache.clear();
+      }
+      const cached = this.projectAreaLabelCache.get(project.key);
+      if (cached) return [...cached];
+      const labels = getProjectAreaLabels(project, 'standalone');
+      this.projectAreaLabelCache.set(project.key, labels);
+      return [...labels];
     } catch {
-      // Silently return undefined
+      // A malformed user config must not stop event delivery.
     }
-    return undefined;
+    return [];
   }
 
   private createOutbox(runId: string): HookOutboxLike {

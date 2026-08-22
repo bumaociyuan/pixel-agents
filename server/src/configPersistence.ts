@@ -35,6 +35,12 @@ export type AdapterSettingKey = (typeof ADAPTER_SETTING_KEYS)[number];
 /** Namespaces = adapter identities sharing the same config.json file. */
 export type ConfigNamespace = 'vscode' | 'standalone';
 
+/** Shared stable project-key → Area labels mapping. Legacy adapter mappings remain migration inputs. */
+export interface ProjectAreaConfigV2 {
+  version: 2;
+  mappings: Record<string, string[]>;
+}
+
 /** What the user answered a provider's consent ask with, durably. `granted` is recorded BEFORE the install writes, so
  *  it can exist with nothing on disk; `declined` means the ANSWER itself turned hooks off, the provenance a revised
  *  "Not Now" needs to know the preference is its to take back (a Settings toggle never records consent). Absent =
@@ -44,6 +50,7 @@ export type HooksConsentState = 'granted' | 'declined';
 export interface PixelAgentsConfig {
   vscode: AdapterSettings;
   standalone: AdapterSettings;
+  projectAreas: ProjectAreaConfigV2;
   externalAssetDirectories: string[];
   /** Per-provider consent to modify that provider's settings file (Claude:
    *  ~/.claude/settings.json). Shared across surfaces — consent is per-human
@@ -89,6 +96,15 @@ function parseHooksEnabled(raw: unknown): Record<string, boolean> {
     if (typeof enabled === 'boolean') out[providerId] = enabled;
   }
   return out;
+}
+
+function parseProjectAreas(raw: unknown): ProjectAreaConfigV2 {
+  const record = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const value = record as { version?: unknown; mappings?: unknown };
+  return {
+    version: 2,
+    mappings: value.version === 2 ? parseAreaMappings(value.mappings) : {},
+  };
 }
 
 /**
@@ -155,6 +171,7 @@ export function readConfig(): PixelAgentsConfig {
       return {
         vscode: { ...DEFAULT_ADAPTER_SETTINGS, areaMappings: {} },
         standalone: { ...DEFAULT_ADAPTER_SETTINGS, areaMappings: {} },
+        projectAreas: { version: 2, mappings: {} },
         externalAssetDirectories: [],
         hooksConsent: {},
         hooksEnabled: {},
@@ -165,6 +182,7 @@ export function readConfig(): PixelAgentsConfig {
     return {
       vscode: parseAdapterSettings(parsed.vscode),
       standalone: parseAdapterSettings(parsed.standalone),
+      projectAreas: parseProjectAreas(parsed.projectAreas),
       externalAssetDirectories: Array.isArray(parsed.externalAssetDirectories)
         ? parsed.externalAssetDirectories.filter((d): d is string => typeof d === 'string')
         : [],
@@ -176,6 +194,7 @@ export function readConfig(): PixelAgentsConfig {
     return {
       vscode: { ...DEFAULT_ADAPTER_SETTINGS },
       standalone: { ...DEFAULT_ADAPTER_SETTINGS },
+      projectAreas: { version: 2, mappings: {} },
       externalAssetDirectories: [],
       hooksConsent: {},
       hooksEnabled: {},

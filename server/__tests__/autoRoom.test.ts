@@ -3,9 +3,15 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { createProjectScope } from '../../core/src/projectScope.js';
 import { readConfig, writeConfig } from '../src/configPersistence.js';
 import { readLayoutFromFile, writeLayoutToFile } from '../src/layoutPersistence.js';
-import { autoCreateRoomForProject } from '../src/providers/hook/pi-agent/autoRoom.js';
+import {
+  autoCreateRoomForProject,
+  ensureProjectArea,
+  getProjectAreaLabels,
+  migrateProjectAreas,
+} from '../src/providers/hook/pi-agent/autoRoom.js';
 
 describe('autoRoom: areaMappings key fix', () => {
   let tempHome: string;
@@ -26,16 +32,87 @@ describe('autoRoom: areaMappings key fix', () => {
     fs.rmSync(tempHome, { recursive: true, force: true });
   });
 
-  it('stores areaMappings keyed by path.basename instead of full projectDir', () => {
-    autoCreateRoomForProject('/some/path/frontend');
+  it('isolates same-basename projects with stable keys and collision-safe labels', () => {
+    const first = createProjectScope('/a/frontend');
+    const second = createProjectScope('/b/frontend');
+
+    expect(ensureProjectArea(first, 'standalone')).toEqual({
+      areaLabel: 'frontend',
+      changed: true,
+    });
+    expect(ensureProjectArea(second, 'standalone')).toEqual({
+      areaLabel: `frontend · ${second.key.slice(-6)}`,
+      changed: true,
+    });
+
+    const config = readConfig();
+    expect(config.projectAreas.mappings).toEqual({
+      [first.key]: ['frontend'],
+      [second.key]: [`frontend · ${second.key.slice(-6)}`],
+    });
+    expect(getProjectAreaLabels(first, 'standalone')).toEqual(['frontend']);
+    expect(getProjectAreaLabels(second, 'standalone')).toEqual([
+      `frontend · ${second.key.slice(-6)}`,
+    ]);
+    expect(config.standalone.areaMappings).toEqual({});
+  });
+
+  it('migrates a canonical full-path legacy mapping directly to its project key', () => {
+    const scope = createProjectScope('/legacy/frontend');
+    const config = readConfig();
+    config.standalone.areaMappings = { [scope.path]: ['Legacy Frontend'] };
+    writeConfig(config);
+
+    expect(migrateProjectAreas([scope]).mappings).toEqual({
+      [scope.key]: ['Legacy Frontend'],
+    });
+    expect(readConfig().standalone.areaMappings).toEqual({
+      [scope.path]: ['Legacy Frontend'],
+    });
+  });
+
+  it('copies an ambiguous basename legacy mapping to every matching project with a warning', () => {
+    const first = createProjectScope('/a/frontend');
+    const second = createProjectScope('/b/frontend');
+    const config = readConfig();
+    config.vscode.areaMappings = { frontend: ['Frontend Team'] };
+    writeConfig(config);
+    const warnings: string[] = [];
+    const originalWarn = console.warn;
+    console.warn = (message: string) => warnings.push(message);
+
+    try {
+      expect(migrateProjectAreas([first, second]).mappings).toEqual({
+        [first.key]: ['Frontend Team'],
+        [second.key]: ['Frontend Team'],
+      });
+    } finally {
+      console.warn = originalWarn;
+    }
+
+    expect(warnings.join('\n')).toContain('ambiguous');
+  });
+
+  it('keeps project-area migration idempotent', () => {
+    const scope = createProjectScope('/legacy/frontend');
+    const config = readConfig();
+    config.standalone.areaMappings = { frontend: ['Frontend Team'] };
+    writeConfig(config);
+
+    migrateProjectAreas([scope]);
+    const first = readConfig().projectAreas;
+    migrateProjectAreas([scope]);
+
+    expect(readConfig().projectAreas).toEqual(first);
+  });
+
+  it('stores a new mapping only in projectAreas under the stable project key', () => {
+    const scope = createProjectScope('/some/path/frontend');
+    autoCreateRoomForProject(scope.path);
 
     const cfg = readConfig();
-    const mappings = cfg.standalone.areaMappings;
-
-    // Key should be "frontend", not "/some/path/frontend"
-    expect(mappings).toHaveProperty('frontend');
-    expect(mappings).not.toHaveProperty('/some/path/frontend');
-    expect(mappings['frontend']).toContain('frontend');
+    expect(cfg.projectAreas.mappings).toEqual({ [scope.key]: ['frontend'] });
+    expect(cfg.standalone.areaMappings).toEqual({});
   });
 
   it('is idempotent: calling twice with the same projectDir does not duplicate the mapping', () => {
@@ -43,11 +120,12 @@ describe('autoRoom: areaMappings key fix', () => {
     autoCreateRoomForProject('/some/path/frontend');
 
     const cfg = readConfig();
-    const mappings = cfg.standalone.areaMappings;
-    expect(mappings['frontend']).toEqual(['frontend']);
+    expect(cfg.projectAreas.mappings[createProjectScope('/some/path/frontend').key]).toEqual([
+      'frontend',
+    ]);
   });
 
-  it('migrates old config with full-path keys to basename keys', () => {
+  it('keeps old full-path mappings as migration input while writing a stable key', () => {
     // Pre-populate config with legacy areaMappings keyed by full path
     const cfg = readConfig();
     cfg.standalone.areaMappings = { '/full/path/frontend': ['frontend'] };
@@ -57,15 +135,13 @@ describe('autoRoom: areaMappings key fix', () => {
     autoCreateRoomForProject('/full/path/frontend');
 
     const migrated = readConfig();
-    const mappings = migrated.standalone.areaMappings;
-
-    // Old key should be gone, new basename key should exist
-    expect(mappings).not.toHaveProperty('/full/path/frontend');
-    expect(mappings).toHaveProperty('frontend');
-    expect(mappings['frontend']).toContain('frontend');
+    expect(migrated.standalone.areaMappings).toEqual({ '/full/path/frontend': ['frontend'] });
+    expect(migrated.projectAreas.mappings[createProjectScope('/full/path/frontend').key]).toEqual([
+      'frontend',
+    ]);
   });
 
-  it('migrates multiple old full-path keys in one call', () => {
+  it('migrates multiple known legacy full-path keys without changing the legacy namespace', () => {
     const cfg = readConfig();
     cfg.standalone.areaMappings = {
       '/path/one': ['frontend'],
@@ -73,18 +149,19 @@ describe('autoRoom: areaMappings key fix', () => {
     };
     writeConfig(cfg);
 
-    autoCreateRoomForProject('/path/one');
+    const one = createProjectScope('/path/one');
+    const two = createProjectScope('/path/two');
+    migrateProjectAreas([one, two]);
 
     const migrated = readConfig();
-    const mappings = migrated.standalone.areaMappings;
-
-    // Both old keys should be migrated
-    expect(mappings).not.toHaveProperty('/path/one');
-    expect(mappings).not.toHaveProperty('/path/two');
-    expect(mappings).toHaveProperty('one');
-    expect(mappings).toHaveProperty('two');
-    expect(mappings['one']).toContain('frontend');
-    expect(mappings['two']).toContain('backend');
+    expect(migrated.standalone.areaMappings).toEqual({
+      '/path/one': ['frontend'],
+      '/path/two': ['backend'],
+    });
+    expect(migrated.projectAreas.mappings).toEqual({
+      [one.key]: ['frontend'],
+      [two.key]: ['backend'],
+    });
   });
 
   it('creates an area definition in the layout', () => {
@@ -114,7 +191,9 @@ describe('autoRoom: areaMappings key fix', () => {
       label: string;
       color: string;
     }>;
-    const colors = areas.filter((a) => ['one', 'two', 'three'].includes(a.label)).map((a) => a.color);
+    const colors = areas
+      .filter((a) => ['one', 'two', 'three'].includes(a.label))
+      .map((a) => a.color);
     const uniqueColors = new Set(colors);
     expect(uniqueColors.size).toBe(3);
   });
