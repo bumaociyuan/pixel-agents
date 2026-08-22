@@ -129,6 +129,8 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         type: 'agentCreated',
         id,
         folderName: agent.folderName,
+        projectKey: agent.projectKey,
+        projectAreaLabels: agent.projectAreaLabels,
         preferredArea: agent.preferredArea,
         isExternal: agent.isExternal || undefined,
         isTeammate: agent.leadAgentId !== undefined || undefined,

@@ -1,3 +1,7 @@
+import {
+  deriveSeatTiles,
+  type SeatTileCatalogEntry,
+} from '../../../../core/src/layout/seatTiles.js';
 import type { ColorValue } from '../../components/ui/types.js';
 import { getColorizedSprite } from '../colorize.js';
 import type {
@@ -164,6 +168,13 @@ function orientationToFacing(orientation: string): Direction {
  *  Facing priority: 1) chair orientation, 2) adjacent desk, 3) forward (DOWN). */
 export function layoutToSeats(furniture: PlacedFurniture[]): Map<string, Seat> {
   const seats = new Map<string, Seat>();
+  const catalog = seatCatalogFor(furniture);
+  const seatTilesByFurniture = new Map<string, Array<{ col: number; row: number }>>();
+  for (const seat of deriveSeatTiles(furniture, catalog)) {
+    const tiles = seatTilesByFurniture.get(seat.furnitureId) ?? [];
+    tiles.push(seat);
+    seatTilesByFurniture.set(seat.furnitureId, tiles);
+  }
 
   // Build set of all desk tiles
   const deskTiles = new Set<string>();
@@ -184,50 +195,61 @@ export function layoutToSeats(furniture: PlacedFurniture[]): Map<string, Seat> {
     { dc: 1, dr: 0, facing: Direction.RIGHT }, // desk is right of chair → face RIGHT
   ];
 
-  // For each chair, every footprint tile becomes a seat.
-  // Multi-tile chairs (e.g. 2-tile couches) produce multiple seats.
+  // The core helper determines canonical seat tiles. This layer only adds facing
+  // direction, desk association, and the UI's backward-compatible seat IDs.
   for (const item of furniture) {
     const entry = getCatalogEntry(item.type);
-    if (!entry || entry.category !== 'chairs') continue;
+    if (!entry) continue;
 
     let seatCount = 0;
-    const bgRows = entry.backgroundTiles ?? 0;
-    for (let dr = bgRows; dr < entry.footprintH; dr++) {
-      for (let dc = 0; dc < entry.footprintW; dc++) {
-        const tileCol = item.col + dc;
-        const tileRow = item.row + dr;
-
-        // Determine facing direction:
-        // 1) Chair orientation takes priority
-        // 2) Adjacent desk direction
-        // 3) Default forward (DOWN)
-        let facingDir: Direction = Direction.DOWN;
-        if (entry.orientation) {
-          facingDir = orientationToFacing(entry.orientation);
-        } else {
-          for (const d of dirs) {
-            if (deskTiles.has(`${tileCol + d.dc},${tileRow + d.dr}`)) {
-              facingDir = d.facing;
-              break;
-            }
+    for (const { col: tileCol, row: tileRow } of seatTilesByFurniture.get(item.uid) ?? []) {
+      // Determine facing direction:
+      // 1) Chair orientation takes priority
+      // 2) Adjacent desk direction
+      // 3) Default forward (DOWN)
+      let facingDir: Direction = Direction.DOWN;
+      if (entry.orientation) {
+        facingDir = orientationToFacing(entry.orientation);
+      } else {
+        for (const d of dirs) {
+          if (deskTiles.has(`${tileCol + d.dc},${tileRow + d.dr}`)) {
+            facingDir = d.facing;
+            break;
           }
         }
-
-        // First seat uses chair uid (backward compat), subsequent use uid:N
-        const seatUid = seatCount === 0 ? item.uid : `${item.uid}:${seatCount}`;
-        seats.set(seatUid, {
-          uid: seatUid,
-          seatCol: tileCol,
-          seatRow: tileRow,
-          facingDir,
-          assigned: false,
-        });
-        seatCount++;
       }
+
+      // First seat uses chair uid (backward compat), subsequent use uid:N
+      const seatUid = seatCount === 0 ? item.uid : `${item.uid}:${seatCount}`;
+      seats.set(seatUid, {
+        uid: seatUid,
+        seatCol: tileCol,
+        seatRow: tileRow,
+        facingDir,
+        assigned: false,
+      });
+      seatCount++;
     }
   }
 
   return seats;
+}
+
+function seatCatalogFor(furniture: readonly PlacedFurniture[]): SeatTileCatalogEntry[] {
+  const entries = new Map<string, SeatTileCatalogEntry>();
+  for (const item of furniture) {
+    if (entries.has(item.type)) continue;
+    const entry = getCatalogEntry(item.type);
+    if (!entry) continue;
+    entries.set(item.type, {
+      id: item.type,
+      category: entry.category ?? '',
+      footprintW: entry.footprintW,
+      footprintH: entry.footprintH,
+      ...(entry.backgroundTiles !== undefined ? { backgroundTiles: entry.backgroundTiles } : {}),
+    });
+  }
+  return [...entries.values()];
 }
 
 /** Get the set of tiles occupied by seats (so they can be excluded from blocked tiles)

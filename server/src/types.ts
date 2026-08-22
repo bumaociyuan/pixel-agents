@@ -106,6 +106,9 @@ export interface PersistedAgent {
   projectDir: string;
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
+  projectKey?: string;
+  projectAreaLabels?: string[];
+  preferredArea?: string;
 
   // -- Agent Teams --
   teamName?: string;

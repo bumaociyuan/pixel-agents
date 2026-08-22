@@ -287,6 +287,9 @@ export function persistAgents(agents: AgentStateStore, adapter: StateAdapter): v
       jsonlFile: agent.jsonlFile,
       projectDir: agent.projectDir,
       folderName: agent.folderName,
+      projectKey: agent.projectKey,
+      projectAreaLabels: agent.projectAreaLabels,
+      preferredArea: agent.preferredArea,
       teamName: agent.teamName,
       agentName: agent.agentName,
       isTeamLead: agent.isTeamLead,
@@ -381,6 +384,9 @@ export function restoreAgents(
       linesProcessed: 0,
       seenUnknownRecordTypes: new Set(),
       folderName: p.folderName,
+      projectKey: p.projectKey,
+      projectAreaLabels: p.projectAreaLabels,
+      preferredArea: p.preferredArea,
       hookDelivered: false,
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
@@ -540,6 +546,10 @@ export function sendExistingAgents(
   // Include folderName and isExternal per agent
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
+  const projectMeta: Record<
+    number,
+    { projectKey?: string; projectAreaLabels?: string[]; preferredArea?: string }
+  > = {};
   for (const [id, agent] of agents) {
     if (agent.folderName) {
       folderNames[id] = agent.folderName;
@@ -547,6 +557,11 @@ export function sendExistingAgents(
     if (agent.isExternal) {
       externalAgents[id] = true;
     }
+    projectMeta[id] = {
+      projectKey: agent.projectKey,
+      projectAreaLabels: agent.projectAreaLabels,
+      preferredArea: agent.preferredArea,
+    };
   }
   console.log(
     `[Pixel Agents] sendExistingAgents: agents=${JSON.stringify(agentIds)}, meta=${JSON.stringify(agentMeta)}`,
@@ -555,7 +570,9 @@ export function sendExistingAgents(
   webview.postMessage({
     type: 'existingAgents',
     agents: agentIds,
-    agentMeta,
+    agentMeta: Object.fromEntries(
+      agentIds.map((id) => [id, { ...agentMeta[id], ...projectMeta[id] }]),
+    ),
     folderNames,
     externalAgents,
   });

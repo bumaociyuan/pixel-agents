@@ -219,6 +219,8 @@ function registerWebSocketRoute(app: FastifyInstance, options: HttpServerOptions
         type: 'agentCreated',
         id,
         folderName: agent.folderName,
+        projectKey: agent.projectKey,
+        projectAreaLabels: agent.projectAreaLabels,
         preferredArea: agent.preferredArea,
         isExternal: agent.isExternal || undefined,
         isTeammate: agent.leadAgentId !== undefined || undefined,

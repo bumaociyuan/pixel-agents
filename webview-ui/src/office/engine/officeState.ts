@@ -179,7 +179,7 @@ export class OfficeState {
     // Second pass: assign remaining characters to free seats
     for (const ch of this.characters.values()) {
       if (ch.seatId) continue;
-      const seatId = this.findFreeSeat(ch.folderName);
+      const seatId = this.findFreeSeat(ch);
       if (seatId) {
         this.seats.get(seatId)!.assigned = true;
         ch.seatId = seatId;
@@ -357,7 +357,9 @@ export class OfficeState {
    * preserves pre-Areas single-stage behavior (skips Stage 1; Stage 2 picks
    * unzoned seats from a layout without `areaTiles`, which is every seat).
    */
-  private findFreeSeat(folderName?: string): string | null {
+  private findFreeSeat(
+    preference?: Pick<Character, 'folderName' | 'projectAreaLabels' | 'preferredArea'>,
+  ): string | null {
     const electronicsTiles = this.buildElectronicsTileSet();
     const freeSeats: string[] = [];
     for (const [uid, seat] of this.seats) {
@@ -365,7 +367,14 @@ export class OfficeState {
     }
     if (freeSeats.length === 0) return null;
 
-    const areaLabels = folderName ? this.areaMappings[folderName] : undefined;
+    const areaLabels =
+      preference?.projectAreaLabels && preference.projectAreaLabels.length > 0
+        ? preference.projectAreaLabels
+        : preference?.preferredArea
+          ? [preference.preferredArea]
+          : preference?.folderName
+            ? this.areaMappings[preference.folderName]
+            : undefined;
 
     // Stage 1 — in-area seats for the folder's mapped Area labels.
     if (areaLabels && areaLabels.length > 0) {
@@ -430,6 +439,9 @@ export class OfficeState {
     skipSpawnEffect?: boolean,
     folderName?: string,
     nearAgentId?: number,
+    projectKey?: string,
+    projectAreaLabels?: string[],
+    preferredArea?: string,
   ): void {
     if (this.characters.has(id)) return;
 
@@ -461,7 +473,7 @@ export class OfficeState {
       seatId = closestFreeSeat(this.seats, anchorAt.col, anchorAt.row);
     }
     if (!seatId) {
-      seatId = this.findFreeSeat(folderName);
+      seatId = this.findFreeSeat({ folderName, projectAreaLabels, preferredArea });
     }
 
     let ch: Character;
@@ -488,6 +500,11 @@ export class OfficeState {
     if (folderName) {
       ch.folderName = folderName;
     }
+    if (projectKey) ch.projectKey = projectKey;
+    if (projectAreaLabels && projectAreaLabels.length > 0) {
+      ch.projectAreaLabels = [...projectAreaLabels];
+    }
+    if (preferredArea) ch.preferredArea = preferredArea;
     if (!skipSpawnEffect) {
       startMatrixEffect(ch, 'spawn');
     }

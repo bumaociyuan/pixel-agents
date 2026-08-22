@@ -11,10 +11,11 @@
 
 import assert from 'node:assert/strict';
 
-import { test } from 'vitest';
+import { expect, test } from 'vitest';
 
 import type { ColorValue } from '../src/components/ui/types.js';
-import { migrateLayoutColors } from '../src/office/layout/layoutSerializer.js';
+import { buildDynamicCatalog } from '../src/office/layout/furnitureCatalog.js';
+import { layoutToSeats, migrateLayoutColors } from '../src/office/layout/layoutSerializer.js';
 import type { OfficeLayout, PlacedFurniture, PlacedPet } from '../src/office/types.js';
 import { TileType } from '../src/office/types.js';
 
@@ -146,4 +147,33 @@ test('migrateLayoutColors is idempotent (running twice produces equivalent outpu
   assert.deepEqual(twice.pets, once.pets);
   assert.deepEqual(twice.tiles, once.tiles);
   assert.deepEqual(twice.tileColors, once.tileColors);
+});
+
+test('layoutToSeats keeps the core background-aware multi-tile seat positions', () => {
+  buildDynamicCatalog({
+    catalog: [
+      {
+        id: 'test-bench',
+        label: 'Test bench',
+        category: 'chairs',
+        width: 32,
+        height: 48,
+        footprintW: 2,
+        footprintH: 3,
+        isDesk: false,
+        canPlaceOnWalls: false,
+        backgroundTiles: 1,
+      },
+    ],
+    sprites: { 'test-bench': [[]] },
+  });
+
+  expect([
+    ...layoutToSeats([{ uid: 'bench-a', type: 'test-bench', col: 5, row: 2 }]).values(),
+  ]).toEqual([
+    expect.objectContaining({ uid: 'bench-a', seatCol: 5, seatRow: 3 }),
+    expect.objectContaining({ uid: 'bench-a:1', seatCol: 6, seatRow: 3 }),
+    expect.objectContaining({ uid: 'bench-a:2', seatCol: 5, seatRow: 4 }),
+    expect.objectContaining({ uid: 'bench-a:3', seatCol: 6, seatRow: 4 }),
+  ]);
 });

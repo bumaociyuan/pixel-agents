@@ -232,7 +232,18 @@ export function useExtensionMessages(
         }
         // Add buffered agents now that layout (and seats) are correct
         for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+          os.addAgent(
+            p.id,
+            p.palette,
+            p.hueShift,
+            p.seatId,
+            true,
+            p.folderName,
+            undefined,
+            p.projectKey,
+            p.projectAreaLabels,
+            p.preferredArea,
+          );
           if (p.isHeadless) os.setHeadless(p.id, true);
         }
         pendingAgents = [];
@@ -247,6 +258,9 @@ export function useExtensionMessages(
       } else if (msg.type === 'agentCreated') {
         const id = msg.id as number;
         const folderName = msg.folderName as string | undefined;
+        const projectKey = msg.projectKey as string | undefined;
+        const projectAreaLabels = msg.projectAreaLabels as string[] | undefined;
+        const preferredArea = msg.preferredArea as string | undefined;
         const isTeammate = msg.isTeammate as boolean | undefined;
         const teammateName = msg.teammateName as string | undefined;
         const teammateParentId = msg.parentAgentId as number | undefined;
@@ -271,6 +285,9 @@ export function useExtensionMessages(
             undefined,
             parentCh?.folderName,
             teammateParentId,
+            parentCh?.projectKey,
+            parentCh?.projectAreaLabels,
+            parentCh?.preferredArea,
           );
           noteFolderName(parentCh?.folderName);
           // Set team metadata on the character
@@ -283,7 +300,18 @@ export function useExtensionMessages(
         } else {
           const palette = msg.palette as number | undefined;
           const hueShift = msg.hueShift as number | undefined;
-          os.addAgent(id, palette, hueShift, undefined, undefined, folderName);
+          os.addAgent(
+            id,
+            palette,
+            hueShift,
+            undefined,
+            undefined,
+            folderName,
+            undefined,
+            projectKey,
+            projectAreaLabels,
+            preferredArea,
+          );
           noteFolderName(folderName);
           if (isHeadlessAgent(msg.isExternal as boolean | undefined)) {
             os.setHeadless(id, true);

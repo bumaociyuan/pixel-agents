@@ -246,4 +246,69 @@ describe('autoRoom: areaMappings key fix', () => {
     expect(afterSecond.areas).toBeDefined();
     expect(afterSecond.areas).toHaveLength(1);
   });
+
+  it('assigns at most four canonical couch seat tiles', () => {
+    writeLayoutToFile({
+      version: 1,
+      cols: 8,
+      rows: 2,
+      tiles: [],
+      furniture: [
+        { uid: 'sofa-a', type: 'SOFA_FRONT', col: 0, row: 0 },
+        { uid: 'sofa-b', type: 'SOFA_FRONT', col: 2, row: 0 },
+        { uid: 'sofa-c', type: 'SOFA_FRONT', col: 4, row: 0 },
+      ],
+    });
+
+    autoCreateRoomForProject('/some/path/couch-room');
+
+    const areaTiles = readLayoutFromFile()?.areaTiles as Array<string | null> | undefined;
+    expect(areaTiles?.filter((label) => label === 'couch-room')).toHaveLength(4);
+    expect(areaTiles?.slice(0, 6)).toEqual([
+      'couch-room',
+      'couch-room',
+      'couch-room',
+      'couch-room',
+      null,
+      null,
+    ]);
+  });
+
+  it('repairs areaTiles without overwriting an existing Area seat', () => {
+    writeLayoutToFile({
+      version: 1,
+      cols: 4,
+      rows: 2,
+      tiles: [],
+      furniture: [{ uid: 'sofa-a', type: 'SOFA_FRONT', col: 0, row: 0 }],
+      areaTiles: ['Existing area'],
+    });
+
+    autoCreateRoomForProject('/some/path/resized-room');
+
+    expect(readLayoutFromFile()?.areaTiles).toEqual([
+      'Existing area',
+      'resized-room',
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+    ]);
+  });
+
+  it('does not assign an unknown chair-prefixed furniture type as a seat', () => {
+    writeLayoutToFile({
+      version: 1,
+      cols: 2,
+      rows: 2,
+      tiles: [],
+      furniture: [{ uid: 'display-a', type: 'CHAIR_DISPLAY', col: 0, row: 0 }],
+    });
+
+    autoCreateRoomForProject('/some/path/no-seat-room');
+
+    expect(readLayoutFromFile()?.areaTiles).toEqual([null, null, null, null]);
+  });
 });

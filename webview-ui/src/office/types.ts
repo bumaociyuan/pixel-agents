@@ -223,6 +223,12 @@ export interface Character {
   matrixEffectSeeds: number[];
   /** Workspace folder name (only set for multi-root workspaces) */
   folderName?: string;
+  /** Stable project identity used to keep multi-root Area placement isolated. */
+  projectKey?: string;
+  /** All Area labels for this project, in priority order. */
+  projectAreaLabels?: string[];
+  /** Compatibility fallback when older hosts only provide one Area label. */
+  preferredArea?: string;
   /** Headless agent: adopted from outside the office, so there is no terminal to
    *  focus. Rendered translucent. Teammates and sub-agents are never headless —
    *  clicking them reaches their lead's / parent's terminal. */

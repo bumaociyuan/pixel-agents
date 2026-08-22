@@ -482,7 +482,17 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
   const folderNames: Record<number, string> = {};
   const externalAgents: Record<number, boolean> = {};
   const persistedSeats = adapter?.loadSeats() ?? {};
-  const agentMeta: Record<number, { palette?: number; hueShift?: number; seatId?: string }> = {};
+  const agentMeta: Record<
+    number,
+    {
+      palette?: number;
+      hueShift?: number;
+      seatId?: string;
+      projectKey?: string;
+      projectAreaLabels?: string[];
+      preferredArea?: string;
+    }
+  > = {};
   for (const [id, agent] of store) {
     agentIds.push(id);
     if (agent.folderName) {
@@ -496,6 +506,9 @@ function handleWebviewReady(send: WsSend, ctx: ClientMessageContext): void {
       palette: agent.palette,
       hueShift: agent.hueShift,
       seatId: persisted?.seatId,
+      projectKey: agent.projectKey,
+      projectAreaLabels: agent.projectAreaLabels,
+      preferredArea: agent.preferredArea,
     };
   }
   send({

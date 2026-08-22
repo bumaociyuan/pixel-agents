@@ -9,6 +9,8 @@ export {
   SERVER_JSON_NAME,
   TASK_DESCRIPTION_DISPLAY_MAX_LENGTH,
 } from './constants.js';
+export type { SeatTile, SeatTileCatalogEntry, SeatTileFurniture } from './layout/seatTiles.js';
+export { deriveSeatTiles } from './layout/seatTiles.js';
 export type { ClientMessage, FurnitureAssetMessage, ServerMessage } from './messages.js';
 export type { ProjectScope } from './projectScope.js';
 export {

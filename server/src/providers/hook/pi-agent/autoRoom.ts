@@ -12,6 +12,11 @@
 
 import * as path from 'node:path';
 
+import { buildFurnitureCatalog } from '../../../../../core/src/assets/build.js';
+import {
+  deriveSeatTiles,
+  type SeatTileCatalogEntry,
+} from '../../../../../core/src/layout/seatTiles.js';
 import {
   canonicalizeProjectPath,
   createProjectScope,
@@ -27,9 +32,6 @@ import { readLayoutFromFile, writeLayoutToFile } from '../../../layoutPersistenc
 import { AUTO_ROOM_COLORS } from './constants.js';
 
 const CHAIRS_PER_AREA = 4;
-
-/** Chair-like furniture types that seat an agent. */
-const CHAIR_TYPE_PREFIXES = ['WOODEN_CHAIR', 'CHAIR', 'SOFA', 'COUCH', 'STOOL'];
 
 /** Run on server startup to migrate old config and ensure areaTiles are populated.
  *  Safe to call multiple times — checks for existing entries before acting. */
@@ -234,30 +236,33 @@ function assignChairsToArea(layout: Record<string, unknown>, areaLabel: string):
   const expectedSize = cols * rows;
   while (areaTiles.length < expectedSize) areaTiles.push(null);
   while (areaTiles.length > expectedSize) areaTiles.pop();
+  layout.areaTiles = areaTiles;
 
-  // Find all chair tiles in the layout
-  interface ChairTile {
-    col: number;
-    row: number;
-  }
-  const allChairTiles: ChairTile[] = [];
-  for (const item of furniture) {
-    const type = (item.type as string) ?? '';
-    if (!CHAIR_TYPE_PREFIXES.some((p) => type.startsWith(p))) continue;
-
-    const itemCol = (item.col as number) ?? 0;
-    const itemRow = (item.row as number) ?? 0;
-    // Each chair tile becomes a seat — assign all footprint tiles
-    // Use a simple heuristic: chairs are 1×1 or 2×1
-    // Most chairs in our catalog are 1×1 footprint
-    allChairTiles.push({ col: itemCol, row: itemRow });
-  }
+  const allChairTiles = deriveSeatTiles(
+    furniture.flatMap((item) => {
+      const uid = item.uid;
+      const type = item.type;
+      const col = item.col;
+      const row = item.row;
+      if (
+        typeof uid !== 'string' ||
+        typeof type !== 'string' ||
+        typeof col !== 'number' ||
+        typeof row !== 'number'
+      ) {
+        return [];
+      }
+      return [{ uid, type, col, row }];
+    }),
+    bundledSeatCatalog(),
+  );
 
   // Classify: which chair tiles are already assigned to an area?
-  const unassigned: ChairTile[] = [];
+  const unassigned: ReturnType<typeof deriveSeatTiles> = [];
   for (const ct of allChairTiles) {
+    if (ct.col < 0 || ct.row < 0 || ct.col >= cols || ct.row >= rows) continue;
     const idx = ct.row * cols + ct.col;
-    if (idx < areaTiles.length && !areaTiles[idx]) {
+    if (!areaTiles[idx]) {
       unassigned.push(ct);
     }
   }
@@ -266,9 +271,7 @@ function assignChairsToArea(layout: Record<string, unknown>, areaLabel: string):
   const toAssign = unassigned.slice(0, CHAIRS_PER_AREA);
   for (const ct of toAssign) {
     const idx = ct.row * cols + ct.col;
-    if (idx < areaTiles.length) {
-      areaTiles[idx] = areaLabel;
-    }
+    areaTiles[idx] = areaLabel;
   }
 
   if (toAssign.length > 0) {
@@ -279,6 +282,28 @@ function assignChairsToArea(layout: Record<string, unknown>, areaLabel: string):
   } else {
     console.log(`[Pixel Agents] auto-room: no unassigned chairs for area "${areaLabel}"`);
   }
+}
+
+function bundledSeatCatalog(): SeatTileCatalogEntry[] {
+  const assetRoots = [
+    path.resolve(__dirname, '../../../../../webview-ui/public/assets'),
+    path.resolve(__dirname, 'webview/assets'),
+  ];
+
+  for (const assetRoot of assetRoots) {
+    const catalog = buildFurnitureCatalog(assetRoot);
+    if (catalog.length > 0) {
+      return catalog.map(({ id, category, footprintW, footprintH, backgroundTiles }) => ({
+        id,
+        category,
+        footprintW,
+        footprintH,
+        ...(backgroundTiles !== undefined ? { backgroundTiles } : {}),
+      }));
+    }
+  }
+
+  return [];
 }
 
 // Round-robin color picker for auto-room areas

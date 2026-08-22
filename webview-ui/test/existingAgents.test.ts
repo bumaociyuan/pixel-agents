@@ -34,6 +34,9 @@ interface AddAgentCall {
   seatId?: string;
   skipSpawnEffect?: boolean;
   folderName?: string;
+  projectKey?: string;
+  projectAreaLabels?: string[];
+  preferredArea?: string;
 }
 
 /** A fake office that records addAgent calls, mirroring how officeCanvasCursor
@@ -48,9 +51,30 @@ function fakeOffice(
     calls,
     headless,
     characters: { has: (id: number) => ids.has(id) },
-    addAgent: (id, palette, hueShift, seatId, skipSpawnEffect, folderName) => {
+    addAgent: (
+      id,
+      palette,
+      hueShift,
+      seatId,
+      skipSpawnEffect,
+      folderName,
+      _nearAgentId,
+      projectKey,
+      projectAreaLabels,
+      preferredArea,
+    ) => {
       ids.add(id);
-      calls.push({ id, palette, hueShift, seatId, skipSpawnEffect, folderName });
+      calls.push({
+        id,
+        palette,
+        hueShift,
+        seatId,
+        skipSpawnEffect,
+        folderName,
+        ...(projectKey !== undefined ? { projectKey } : {}),
+        ...(projectAreaLabels !== undefined ? { projectAreaLabels } : {}),
+        ...(preferredArea !== undefined ? { preferredArea } : {}),
+      });
     },
     setHeadless: (id, isHeadless) => {
       if (isHeadless) headless.push(id);
@@ -102,6 +126,38 @@ test('layout not ready: buffers restored agents for the later layoutLoaded flush
   assert.deepEqual(pending, [
     { id: 5, palette: 2, hueShift: 90, seatId: 'seat-a', folderName: 'alpha', isHeadless: false },
   ]);
+});
+
+test('restored agents retain their complete project area labels for later layout replacement', () => {
+  const os = fakeOffice();
+  const pending: PendingAgent[] = [];
+
+  reconcileExistingAgents(
+    os,
+    [8],
+    {
+      8: {
+        projectKey: 'path:project-a',
+        projectAreaLabels: ['Frontend', 'Frontend overflow'],
+        preferredArea: 'Frontend',
+      },
+    },
+    { 8: 'frontend' },
+    true,
+    pending,
+  );
+
+  assert.deepEqual(os.calls[0], {
+    id: 8,
+    palette: undefined,
+    hueShift: undefined,
+    seatId: undefined,
+    skipSpawnEffect: true,
+    folderName: 'frontend',
+    projectKey: 'path:project-a',
+    projectAreaLabels: ['Frontend', 'Frontend overflow'],
+    preferredArea: 'Frontend',
+  });
 });
 
 // ── idempotence / dedup ─────────────────────────────────────────
