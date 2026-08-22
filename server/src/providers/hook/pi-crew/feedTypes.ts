@@ -14,6 +14,7 @@ export type PiCrewEventType =
   | 'run.created'
   | 'run.completed'
   | 'run.failed'
+  | 'run.cancelled'
   // Task lifecycle
   | 'task.started'
   | 'task.completed'
@@ -32,7 +33,9 @@ export type PiCrewEventType =
   | 'worker.spawn_error'
   | 'worker.response_timeout'
   | 'worker.final_drain'
-  | 'worker.hard_kill';
+  | 'worker.hard_kill'
+  | 'worker.failed'
+  | 'worker.terminated';
 
 /** A single event from pi-crew's events.jsonl. */
 export interface PiCrewEvent {

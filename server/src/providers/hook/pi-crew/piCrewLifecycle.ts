@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { ProjectScope } from '../../../../../core/src/projectScope.js';
 import { PI_CREW_HOOK_EVENTS, PI_CREW_TOOL_NAMES } from './constants.js';
 import type { PiCrewEvent } from './feedTypes.js';
@@ -50,6 +52,16 @@ export function createRunLifecycle(
 }
 
 export function applyPiCrewEvent(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] {
+  if (event.runId !== state.runId) {
+    return [
+      {
+        hook_event_name: 'CrewDiagnostic',
+        reason: 'run_id_mismatch',
+        event_run_id: event.runId,
+        state_run_id: state.runId,
+      },
+    ];
+  }
   if (state.terminal) return [];
 
   switch (event.type) {
@@ -57,6 +69,7 @@ export function applyPiCrewEvent(state: RunLifecycleState, event: PiCrewEvent): 
       return startPlanner(state, event);
     case 'run.completed':
     case 'run.failed':
+    case 'run.cancelled':
       return finishRun(state, event.type);
     case 'task.started':
       return startTask(state, event);
@@ -80,6 +93,8 @@ export function applyPiCrewEvent(state: RunLifecycleState, event: PiCrewEvent): 
     case 'worker.response_timeout':
     case 'worker.final_drain':
     case 'worker.hard_kill':
+    case 'worker.failed':
+    case 'worker.terminated':
       return cleanUpWorker(state, event);
     default:
       return [];
@@ -89,7 +104,7 @@ export function applyPiCrewEvent(state: RunLifecycleState, event: PiCrewEvent): 
 function startPlanner(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] {
   if (state.planner?.active) return [];
 
-  const planner = getAgent(state, 'crew-planner');
+  const planner = getAgent(state, 'planner');
   state.planner = {
     agentKey: planner.key,
     toolId: `crew-plan:${state.project.key}:${sanitizeKey(state.runId)}`,
@@ -126,15 +141,23 @@ function startTask(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] 
     `${role}:${taskId}`;
   const agent = getAgent(state, agentName);
   const task = state.tasks.get(taskId);
+  const attemptId = event.metadata?.attemptId || 'default';
 
-  if (task?.active && task.agentKey === agent.key) return [];
-  if (task && !task.active && !task.prepared && task.attemptId === event.metadata?.attemptId) {
+  if (task?.active && task.agentKey === agent.key && task.attemptId === attemptId) return [];
+  if (task && !task.active && !task.prepared && task.attemptId === attemptId) {
     return [];
   }
 
   const payloads: HookPayload[] = [];
-  if (task?.active && task.agentKey !== agent.key) {
-    payloads.push(...finishTask(state, task, 'task.reassigned'));
+  if (task?.active) {
+    payloads.push(
+      ...finishTask(
+        state,
+        task,
+        task.agentKey === agent.key ? 'task.retry' : 'task.reassigned',
+        task.agentKey !== agent.key,
+      ),
+    );
   }
   payloads.push(
     ...introduceAgent(agent, {
@@ -150,11 +173,11 @@ function startTask(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] 
     id: taskId,
     agentKey: agent.key,
     role,
-    toolId: taskToolId(state, agent, taskId),
+    toolId: taskToolId(state, agent, taskId, attemptId),
     active: true,
     blocked: false,
     prepared: false,
-    attemptId: event.metadata?.attemptId,
+    attemptId,
   };
   state.tasks.set(taskId, nextTask);
   agent.activeTaskIds.add(taskId);
@@ -244,7 +267,7 @@ function prepareParallelTasks(state: RunLifecycleState, event: PiCrewEvent): Hoo
       id: taskId,
       agentKey: agent.key,
       role,
-      toolId: taskToolId(state, agent, taskId),
+      toolId: taskToolId(state, agent, taskId, 'default'),
       active: false,
       blocked: false,
       prepared: true,
@@ -268,13 +291,15 @@ function finishTaskById(
   reason: string,
 ): HookPayload[] {
   const task = taskId ? state.tasks.get(taskId) : undefined;
-  return task?.active ? finishTask(state, task, reason) : [];
+  if (task?.active) return finishTask(state, task, reason);
+  return task?.prepared ? discardPreparedTask(state, task, reason) : [];
 }
 
 function finishTask(
   state: RunLifecycleState,
   task: TaskLifecycleState,
   reason: string,
+  endSessionWhenIdle = true,
 ): HookPayload[] {
   const agent = state.agents.get(task.agentKey);
   if (!agent || !task.active) return [];
@@ -292,27 +317,47 @@ function finishTask(
       task_id: task.id,
     },
   ];
-  if (agent.activeTaskIds.size === 0) {
+  if (endSessionWhenIdle && !hasLiveTasksForAgent(state, agent.key)) {
     payloads.push(endAgent(agent, reason));
   }
   return payloads;
 }
 
-function cleanUpWorker(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] {
-  if (event.taskId) return finishTaskById(state, event.taskId, event.type);
+function discardPreparedTask(
+  state: RunLifecycleState,
+  task: TaskLifecycleState,
+  reason: string,
+): HookPayload[] {
+  const agent = state.agents.get(task.agentKey);
+  if (!agent || !task.prepared) return [];
 
-  const agentName = workerName(event);
-  if (!agentName) return [];
-  const agent = state.agents.get(sanitizeKey(agentName));
+  task.prepared = false;
+  return hasLiveTasksForAgent(state, agent.key) ? [] : [endAgent(agent, reason)];
+}
+
+function cleanUpWorker(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] {
+  const task = event.taskId ? state.tasks.get(event.taskId) : undefined;
+  const agentName = explicitWorkerName(event);
+  const agent = agentName
+    ? state.agents.get(sanitizeKey(agentName))
+    : task
+      ? state.agents.get(task.agentKey)
+      : state.agents.get(sanitizeKey(workerFallbackName(event)));
   if (!agent) return [];
 
-  return [...agent.activeTaskIds].flatMap((taskId) => finishTaskById(state, taskId, event.type));
+  const payloads: HookPayload[] = [];
+  for (const candidate of state.tasks.values()) {
+    if (candidate.agentKey === agent.key && (candidate.active || candidate.prepared)) {
+      payloads.push(...finishTaskById(state, candidate.id, event.type));
+    }
+  }
+  return payloads;
 }
 
 function finishRun(state: RunLifecycleState, reason: string): HookPayload[] {
   const payloads: HookPayload[] = [];
   for (const task of state.tasks.values()) {
-    if (task.active) payloads.push(...finishTask(state, task, reason));
+    if (task.active || task.prepared) payloads.push(...finishTaskById(state, task.id, reason));
   }
   if (state.planner?.active) {
     const planner = state.agents.get(state.planner.agentKey);
@@ -372,17 +417,29 @@ function getAgent(state: RunLifecycleState, name: string): AgentLifecycleState {
   return agent;
 }
 
-function taskToolId(state: RunLifecycleState, agent: AgentLifecycleState, taskId: string): string {
-  return `crew-task:${state.project.key}:${sanitizeKey(state.runId)}:${agent.key}:${sanitizeKey(taskId)}`;
+function hasLiveTasksForAgent(state: RunLifecycleState, agentKey: string): boolean {
+  return [...state.tasks.values()].some(
+    (task) => task.agentKey === agentKey && (task.active || task.prepared),
+  );
+}
+
+function taskToolId(
+  state: RunLifecycleState,
+  agent: AgentLifecycleState,
+  taskId: string,
+  attemptId: string,
+): string {
+  return `crew-task:${state.project.key}:${sanitizeKey(state.runId)}:${agent.key}:${sanitizeKey(taskId)}:${sanitizeKey(attemptId)}`;
 }
 
 function sanitizeKey(value: string): string {
-  return (
+  const readable =
     value
       .trim()
       .replace(/[^A-Za-z0-9_-]+/g, '-')
-      .replace(/^-+|-+$/g, '') || 'unknown'
-  );
+      .replace(/^-+|-+$/g, '') || 'unknown';
+  const suffix = createHash('sha256').update(value).digest('base64url').slice(0, 8);
+  return `${readable}-${suffix}`;
 }
 
 function stringValue(value: unknown): string | undefined {
@@ -395,13 +452,16 @@ function arrayOfStrings(value: unknown): string[] {
     : [];
 }
 
-function workerName(event: PiCrewEvent): string | undefined {
+function explicitWorkerName(event: PiCrewEvent): string | undefined {
   return (
     stringValue(event.data?.agent) ||
     stringValue(event.data?.workerId) ||
-    stringValue(event.data?.worker_id) ||
-    (event.taskId ? `${stringValue(event.data?.role) || 'worker'}:${event.taskId}` : undefined)
+    stringValue(event.data?.worker_id)
   );
+}
+
+function workerFallbackName(event: PiCrewEvent): string {
+  return `${stringValue(event.data?.role) || 'worker'}:${event.taskId || 'unknown'}`;
 }
 
 function roleToToolName(role: string): string {

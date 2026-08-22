@@ -22,7 +22,7 @@ function taskStarted(
   return {
     time: '2026-08-22T00:00:00.000Z',
     type: 'task.started',
-    runId: 'event-run-id',
+    runId: 'run-1',
     taskId,
     message: `Work on ${taskId}`,
     data: { agent, role: 'worker' },
@@ -39,7 +39,7 @@ function taskCompleted(taskId: string): {
   return {
     time: '2026-08-22T00:00:00.000Z',
     type: 'task.completed',
-    runId: 'event-run-id',
+    runId: 'run-1',
     taskId,
   };
 }
@@ -58,7 +58,7 @@ function lifecycleEvent(
   return {
     time: '2026-08-22T00:00:00.000Z',
     type,
-    runId: 'event-run-id',
+    runId: 'run-1',
     taskId,
     data,
   };
@@ -89,13 +89,17 @@ describe('pi-crew lifecycle', () => {
   });
 
   it('namespaces equal agent names by project and run', () => {
+    const event = taskStarted('t1', 'RedMoon');
+    event.runId = 'r1';
     const a = applyPiCrewEvent(
       createRunLifecycle(createProjectScope('/a/app'), 'r1', '/a/app'),
-      taskStarted('t1', 'RedMoon'),
+      event,
     );
+    const otherProjectEvent = taskStarted('t1', 'RedMoon');
+    otherProjectEvent.runId = 'r1';
     const b = applyPiCrewEvent(
       createRunLifecycle(createProjectScope('/b/app'), 'r1', '/b/app'),
-      taskStarted('t1', 'RedMoon'),
+      otherProjectEvent,
     );
 
     expect(a[0].session_id).not.toBe(b[0].session_id);
@@ -210,5 +214,109 @@ describe('pi-crew lifecycle', () => {
       'CrewPlanDone',
       'CrewSessionEnd',
     ]);
+  });
+
+  it.each(['worker.hard_kill', 'worker.failed', 'worker.terminated'])(
+    'cleans every active and prepared task when %s includes a task id',
+    (type) => {
+      const state = run();
+      applyPiCrewEvent(state, taskStarted('t1', 'A'));
+      applyPiCrewEvent(state, taskStarted('t2', 'A'));
+      applyPiCrewEvent(
+        state,
+        lifecycleEvent('task.parallel_start', undefined, {
+          taskIds: ['t3'],
+          roles: ['worker'],
+          agents: ['A'],
+        }),
+      );
+
+      const payloads = applyPiCrewEvent(state, lifecycleEvent(type, 't1'));
+
+      expect(payloads.map(eventName)).toEqual(['CrewTaskDone', 'CrewTaskDone', 'CrewSessionEnd']);
+      expect(payloads.filter(isSessionEnd)).toHaveLength(1);
+      expect([...state.tasks.values()].every((task) => !task.active && !task.prepared)).toBe(true);
+    },
+  );
+
+  it('closes a prepared worker session when its task is cancelled', () => {
+    const state = run();
+    applyPiCrewEvent(
+      state,
+      lifecycleEvent('task.parallel_start', undefined, {
+        taskIds: ['t1'],
+        roles: ['worker'],
+        agents: ['A'],
+      }),
+    );
+
+    expect(applyPiCrewEvent(state, lifecycleEvent('task.cancelled', 't1')).map(eventName)).toEqual([
+      'CrewSessionEnd',
+    ]);
+  });
+
+  it('cleans active and prepared sessions when a run is cancelled', () => {
+    const state = run();
+    applyPiCrewEvent(state, taskStarted('t1', 'A'));
+    applyPiCrewEvent(
+      state,
+      lifecycleEvent('task.parallel_start', undefined, {
+        taskIds: ['t2'],
+        roles: ['worker'],
+        agents: ['B'],
+      }),
+    );
+
+    expect(applyPiCrewEvent(state, lifecycleEvent('run.cancelled')).map(eventName)).toEqual([
+      'CrewTaskDone',
+      'CrewSessionEnd',
+      'CrewSessionEnd',
+    ]);
+    expect(state.terminal).toBe(true);
+  });
+
+  it('starts a new attempt with a distinct tool id', () => {
+    const state = run();
+    const first = applyPiCrewEvent(state, taskStarted('t1', 'A', 'attempt-1'));
+    const retry = applyPiCrewEvent(state, taskStarted('t1', 'A', 'attempt-2'));
+
+    expect(first[1].tool_id).toContain('attempt-1');
+    expect(retry.map(eventName)).toEqual(['CrewTaskDone', 'CrewTaskStart']);
+    expect(retry[1].tool_id).toContain('attempt-2');
+    expect(retry[1].tool_id).not.toBe(first[1].tool_id);
+  });
+
+  it('uses the reserved planner identity instead of a worker-like name', () => {
+    const state = run();
+    const planner = applyPiCrewEvent(state, lifecycleEvent('run.created'));
+    const worker = applyPiCrewEvent(state, taskStarted('t1', 'crew-planner'));
+
+    expect(planner[0].agent_name).toBe('planner');
+    expect(worker[0].session_id).not.toBe(planner[0].session_id);
+  });
+
+  it('keeps sanitization collisions in separate agent namespaces', () => {
+    const state = run();
+    const slash = applyPiCrewEvent(state, taskStarted('t1', 'A/B'));
+    const hyphen = applyPiCrewEvent(state, taskStarted('t2', 'A-B'));
+
+    expect(hyphen[0].hook_event_name).toBe('CrewSessionStart');
+    expect(hyphen[0].session_id).not.toBe(slash[0].session_id);
+  });
+
+  it('returns a diagnostic without mutating state for another run event', () => {
+    const state = run();
+    const otherRunEvent = taskStarted('t1', 'A');
+    otherRunEvent.runId = 'other-run';
+
+    expect(applyPiCrewEvent(state, otherRunEvent)).toEqual([
+      {
+        hook_event_name: 'CrewDiagnostic',
+        reason: 'run_id_mismatch',
+        event_run_id: 'other-run',
+        state_run_id: 'run-1',
+      },
+    ]);
+    expect(state.agents).toHaveLength(0);
   });
 });

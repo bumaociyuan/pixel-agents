@@ -100,4 +100,31 @@ describe('PiCrewEventWatcher', () => {
     expect(watcher.isRunning()).toBe(true);
     watcher.stop();
   });
+
+  it('prunes a stale cancelled run', () => {
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+    });
+    const runDir = path.join(tempDir, '.crew', 'state', 'runs', 'run-001');
+    fs.mkdirSync(runDir, { recursive: true });
+    const eventsPath = path.join(runDir, 'events.jsonl');
+    fs.writeFileSync(
+      eventsPath,
+      `${JSON.stringify({
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'run.cancelled',
+        runId: 'run-001',
+      })}\n`,
+    );
+    const stale = new Date(Date.now() - 6 * 60 * 1000);
+    fs.utimesSync(eventsPath, stale, stale);
+
+    watcher.start();
+
+    const states = (watcher as unknown as { runStates: Map<string, unknown> }).runStates;
+    expect(states).toHaveLength(0);
+    watcher.stop();
+  });
 });

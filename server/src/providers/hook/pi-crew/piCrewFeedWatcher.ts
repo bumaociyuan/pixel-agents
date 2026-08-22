@@ -222,7 +222,12 @@ export class PiCrewEventWatcher {
 
       // Check if the last event in the log is a terminal event
       const lastEvent = this.readLastEvent(eventsPath);
-      if (lastEvent && (lastEvent.type === 'run.completed' || lastEvent.type === 'run.failed')) {
+      if (
+        lastEvent &&
+        (lastEvent.type === 'run.completed' ||
+          lastEvent.type === 'run.failed' ||
+          lastEvent.type === 'run.cancelled')
+      ) {
         this.runStates.delete(eventsPath);
         console.log(`[Pixel Agents] pi-crew: pruned completed run ${state.runId}`);
       }

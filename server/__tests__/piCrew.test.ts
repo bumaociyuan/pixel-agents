@@ -10,7 +10,7 @@ describe('piCrewProvider', () => {
       {
         time: '2026-08-22T00:00:00.000Z',
         type: 'task.started',
-        runId: 'event-run-id',
+        runId: 'run-1',
         taskId: 't1',
         data: { agent: 'RedMoon', role: 'worker' },
       },
