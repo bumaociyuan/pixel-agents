@@ -796,6 +796,11 @@ components:
           description: Per-agent diagnostic info; shape opaque to the protocol.
           items:
             type: object
+        piCrewDiagnostics:
+          type: array
+          description: pi-crew watcher diagnostic ring buffer.
+          items:
+            type: object
 
     # ── Client message variants ────────────────────────────────────
 

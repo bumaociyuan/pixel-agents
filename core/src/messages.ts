@@ -319,7 +319,7 @@ export interface WorkspaceFolder {
 export interface AgentDiagnostics {
   type: 'agentDiagnostics';
   agents: Record<string, any>[];
-  piCrewDiagnostics?: Record<string, unknown>[];
+  piCrewDiagnostics?: Record<string, any>[];
 }
 
 export interface WebviewReady {
