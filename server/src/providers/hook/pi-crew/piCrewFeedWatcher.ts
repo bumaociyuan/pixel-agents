@@ -20,10 +20,12 @@ import * as http from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
 
+import { createProjectScope } from '../../../../../core/src/projectScope.js';
 import { readConfig } from '../../../configPersistence.js';
 import { PI_CREW_FEED_POLL_MS } from './constants.js';
 import type { PiCrewEvent, RunEventState } from './feedTypes.js';
 import { piCrewEventToHookPayloads } from './piCrew.js';
+import { createRunLifecycle } from './piCrewLifecycle.js';
 
 export interface EventWatcherOptions {
   /** Project directories to scan for .crew/state/runs/. */
@@ -40,8 +42,6 @@ export class PiCrewEventWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
   /** eventsPath → RunEventState */
   private runStates = new Map<string, RunEventState>();
-  /** Track task ownership across runs: taskId → agentName */
-  private taskOwners = new Map<string, string>();
   /** Known project directories (for new-project detection). */
   private knownProjects = new Set<string>();
 
@@ -137,8 +137,7 @@ export class PiCrewEventWatcher {
         cwd,
         offset,
         lineBuffer: '',
-        taskAgents: new Map(),
-        knownAgents: new Set(),
+        lifecycle: createRunLifecycle(createProjectScope(cwd), runId, cwd),
       });
 
       console.log(`[Pixel Agents] pi-crew: discovered run ${runId} in ${projectDir}`);
@@ -197,28 +196,9 @@ export class PiCrewEventWatcher {
   private dispatchEvent(event: PiCrewEvent, state: RunEventState): void {
     const projectDir = state.cwd;
 
-    // Track agent names from task.started events
-    if (event.type === 'task.started' && event.taskId && event.data) {
-      const agentName =
-        (event.data.agent as string) || (event.data.role as string) || `worker-${event.taskId}`;
-      state.taskAgents.set(event.taskId, agentName);
-      state.knownAgents.add(agentName);
-    }
-
-    // Handle task ownership transitions for cleanup
-    if (
-      event.type === 'task.completed' ||
-      event.type === 'task.failed' ||
-      event.type === 'task.cancelled'
-    ) {
-      if (event.taskId) {
-        this.taskOwners.delete(event.taskId);
-      }
-    }
-
     const preferredArea = this.findPreferredArea(projectDir);
 
-    const payloads = piCrewEventToHookPayloads(event, state);
+    const payloads = piCrewEventToHookPayloads(event, state.lifecycle);
     for (const payload of payloads) {
       if (preferredArea && payload.hook_event_name === 'CrewSessionStart') {
         payload.preferred_area = preferredArea;
@@ -243,15 +223,6 @@ export class PiCrewEventWatcher {
       // Check if the last event in the log is a terminal event
       const lastEvent = this.readLastEvent(eventsPath);
       if (lastEvent && (lastEvent.type === 'run.completed' || lastEvent.type === 'run.failed')) {
-        // Send SessionEnd for all known agents
-        for (const agent of state.knownAgents) {
-          this.postToHook({
-            hook_event_name: 'CrewSessionEnd',
-            session_id: `pi-crew:${agent}`,
-            agent_name: agent,
-            reason: 'run.completed',
-          });
-        }
         this.runStates.delete(eventsPath);
         console.log(`[Pixel Agents] pi-crew: pruned completed run ${state.runId}`);
       }

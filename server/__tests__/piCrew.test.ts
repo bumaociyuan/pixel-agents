@@ -1,8 +1,28 @@
 import { describe, expect, it } from 'vitest';
 
-import { piCrewProvider } from '../src/providers/hook/pi-crew/piCrew.js';
+import { createProjectScope } from '../../core/src/projectScope.js';
+import { piCrewEventToHookPayloads, piCrewProvider } from '../src/providers/hook/pi-crew/piCrew.js';
+import { createRunLifecycle } from '../src/providers/hook/pi-crew/piCrewLifecycle.js';
 
 describe('piCrewProvider', () => {
+  it('maps a regular task start through the lifecycle state machine', () => {
+    const payloads = piCrewEventToHookPayloads(
+      {
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'task.started',
+        runId: 'event-run-id',
+        taskId: 't1',
+        data: { agent: 'RedMoon', role: 'worker' },
+      },
+      createRunLifecycle(createProjectScope('/a/app'), 'run-1', '/a/app'),
+    );
+
+    expect(payloads.map((payload) => payload.hook_event_name)).toEqual([
+      'CrewSessionStart',
+      'CrewTaskStart',
+    ]);
+  });
+
   describe('identity', () => {
     it('has kind "hook"', () => {
       expect(piCrewProvider.kind).toBe('hook');

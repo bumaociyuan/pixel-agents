@@ -6,6 +6,8 @@
  * it only reads the JSONL files on disk.
  */
 
+import type { RunLifecycleState } from './piCrewLifecycle.js';
+
 /** pi-crew event types we care about for pixel-agent visualization. */
 export type PiCrewEventType =
   // Run lifecycle
@@ -56,8 +58,5 @@ export interface RunEventState {
   cwd: string;
   offset: number;
   lineBuffer: string;
-  /** Known task → agent mapping for this run. */
-  taskAgents: Map<string, string>;
-  /** Known agent names from this run. */
-  knownAgents: Set<string>;
+  lifecycle: RunLifecycleState;
 }
