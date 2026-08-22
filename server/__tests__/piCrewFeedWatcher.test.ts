@@ -4,6 +4,10 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createProjectScope } from '../../core/src/projectScope.js';
+import type {
+  HookDeliveryResult,
+  HookOutboxItem,
+} from '../src/providers/hook/pi-crew/hookOutbox.js';
 import { IncrementalJsonlReader } from '../src/providers/hook/pi-crew/jsonlReader.js';
 import { piCrewProvider } from '../src/providers/hook/pi-crew/piCrew.js';
 import { PiCrewCheckpointStore } from '../src/providers/hook/pi-crew/piCrewCheckpointStore.js';
@@ -136,14 +140,13 @@ describe('PiCrewEventWatcher', () => {
   });
 
   it('forwards a run mismatch diagnostic to hook normalization', () => {
+    const captured: Record<string, unknown>[] = [];
     const watcher = new PiCrewEventWatcher({
       projectDirs: [tempDir],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
+      outboxFactory: () => createCapturingOutbox(captured, () => true),
     });
-    const captured: Record<string, unknown>[] = [];
-    (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook =
-      (payload) => captured.push(payload);
     const runDir = path.join(tempDir, '.crew', 'state', 'runs', 'run-001');
     fs.mkdirSync(runDir, { recursive: true });
     fs.writeFileSync(
@@ -207,7 +210,7 @@ describe('PiCrewEventWatcher', () => {
     watcher.stop();
   });
 
-  it('retries a terminal startup checkpoint save without replaying its history', () => {
+  it('retries a terminal startup checkpoint save without replaying its history', async () => {
     const { eventsPath } = writeRun(tempDir, 'terminal-save-retry', [
       { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'terminal-save-retry' },
       { time: '2026-08-22T00:00:01.000Z', type: 'run.completed', runId: 'terminal-save-retry' },
@@ -227,9 +230,8 @@ describe('PiCrewEventWatcher', () => {
       authToken: 'test-token',
       checkpointStore: store,
       onDiagnostic: (message) => diagnostics.push(message),
+      outboxFactory: () => createCapturingOutbox(captured, () => true),
     });
-    (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook =
-      (payload) => captured.push(payload);
 
     expect(() => watcher.start()).not.toThrow();
     expect(captured).toEqual([]);
@@ -237,13 +239,18 @@ describe('PiCrewEventWatcher', () => {
     expect(diagnostics.join('\n')).toContain('terminal checkpoint disk full');
 
     failSave = false;
+    await watcher.waitForIdle();
     (watcher as unknown as { poll: () => void }).poll();
 
     expect(
-      store.load(createProjectScope(tempDir).key, 'terminal-save-retry')?.committedOffset,
-    ).toBe(fs.statSync(eventsPath).size);
+      await waitUntil(
+        () =>
+          store.load(createProjectScope(tempDir).key, 'terminal-save-retry')?.committedOffset ===
+          fs.statSync(eventsPath).size,
+      ),
+    ).toBe(true);
     expect(captured).toEqual([]);
-    watcher.stop();
+    await watcher.stop();
   });
 
   it('resumes only records after a stored checkpoint', () => {
@@ -273,7 +280,7 @@ describe('PiCrewEventWatcher', () => {
     watcher.stop();
   });
 
-  it('persists an offset only after a delivery confirmation and then suppresses replay', () => {
+  it('persists an offset only after a delivery confirmation and then suppresses replay', async () => {
     const { eventsPath } = writeRun(tempDir, 'confirmed-run', [
       { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'confirmed-run' },
     ]);
@@ -282,27 +289,74 @@ describe('PiCrewEventWatcher', () => {
 
     unconfirmed.start();
 
+    await unconfirmed.waitForIdle();
     (unconfirmed as unknown as { poll: () => void }).poll();
 
     expect(store.load(createProjectScope(tempDir).key, 'confirmed-run')).toBeNull();
-    unconfirmed.stop();
+    await unconfirmed.stop();
 
     const confirmedPayloads: Record<string, unknown>[] = [];
     const confirmed = createCapturingWatcher(tempDir, confirmedPayloads, store, () => true);
     confirmed.start();
 
     expect(confirmedPayloads).toHaveLength(2);
-    expect(store.load(createProjectScope(tempDir).key, 'confirmed-run')?.committedOffset).toBe(
-      fs.statSync(eventsPath).size,
-    );
-    confirmed.stop();
+    expect(
+      await waitUntil(
+        () =>
+          store.load(createProjectScope(tempDir).key, 'confirmed-run')?.committedOffset ===
+          fs.statSync(eventsPath).size,
+      ),
+    ).toBe(true);
+    await confirmed.stop();
 
     const replayedPayloads: Record<string, unknown>[] = [];
     const restarted = createCapturingWatcher(tempDir, replayedPayloads, store, () => true);
     restarted.start();
 
     expect(replayedPayloads).toEqual([]);
-    restarted.stop();
+    await restarted.stop();
+  });
+
+  it('commits a source event only after its complete envelope is permanently diagnosed', async () => {
+    const { eventsPath } = writeRun(tempDir, 'permanent-outbox-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'permanent-outbox-run' },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const delivery = deferred<HookDeliveryResult>();
+    const delivered: HookOutboxItem[] = [];
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      checkpointStore: store,
+      outboxFactory: () => ({
+        enqueue: (item: HookOutboxItem) => {
+          delivered.push(item);
+          return delivery.promise;
+        },
+        drain: async () => true,
+      }),
+    });
+
+    watcher.start();
+
+    expect(await waitUntil(() => delivered.length === 1)).toBe(true);
+    expect(store.load(createProjectScope(tempDir).key, 'permanent-outbox-run')).toBeNull();
+    expect(delivered[0]?.payloads.map((payload) => payload.idempotencyKey)).toEqual([
+      expect.stringMatching(/:0$/),
+      expect.stringMatching(/:1$/),
+    ]);
+
+    delivery.resolve({ outcome: 'permanent_failure', attempts: 1, permanentFailures: 1 });
+
+    expect(
+      await waitUntil(
+        () =>
+          store.load(createProjectScope(tempDir).key, 'permanent-outbox-run')?.committedOffset ===
+          fs.statSync(eventsPath).size,
+      ),
+    ).toBe(true);
+    await watcher.stop();
   });
 
   it('does not cross an unconfirmed record to commit a later confirmed record', () => {
@@ -324,7 +378,7 @@ describe('PiCrewEventWatcher', () => {
     watcher.stop();
   });
 
-  it('re-emits the original payload from the same watcher after a failed confirmation', () => {
+  it('re-emits the original payload from the same watcher after a failed confirmation', async () => {
     writeRun(tempDir, 'retry-same-watcher', [
       { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'retry-same-watcher' },
     ]);
@@ -334,9 +388,12 @@ describe('PiCrewEventWatcher', () => {
     const watcher = createCapturingWatcher(tempDir, captured, store, () => confirmed);
 
     watcher.start();
+    await watcher.waitForIdle();
     confirmed = true;
     (watcher as unknown as { poll: () => void }).poll();
 
+    await watcher.waitForIdle();
+    expect(captured).toHaveLength(4);
     expect(captured.map((payload) => payload.hook_event_name)).toEqual([
       'CrewSessionStart',
       'CrewPlanStart',
@@ -346,10 +403,10 @@ describe('PiCrewEventWatcher', () => {
     expect(
       store.load(createProjectScope(tempDir).key, 'retry-same-watcher')?.committedOffset,
     ).toBeGreaterThan(0);
-    watcher.stop();
+    await watcher.stop();
   });
 
-  it('rebuilds lifecycle when rotation replaces a terminal run with a new active history', () => {
+  it('rebuilds lifecycle when rotation replaces a terminal run with a new active history', async () => {
     const { eventsPath } = writeRun(tempDir, 'rotated-run', [
       {
         time: '2026-08-22T00:00:00.000Z',
@@ -362,11 +419,15 @@ describe('PiCrewEventWatcher', () => {
     const captured: Record<string, unknown>[] = [];
     const watcher = createCapturingWatcher(tempDir, captured, store, () => true);
     watcher.start();
+    expect(await waitUntil(() => captured.length === 2)).toBe(true);
+    await watcher.waitForIdle();
     fs.appendFileSync(
       eventsPath,
       `${JSON.stringify({ time: '2026-08-22T00:00:01.000Z', type: 'run.completed', runId: 'rotated-run', metadata: { fingerprint: 'old-completed' } })}\n`,
     );
     (watcher as unknown as { poll: () => void }).poll();
+    expect(await waitUntil(() => captured.length === 4)).toBe(true);
+    await watcher.waitForIdle();
     fs.renameSync(eventsPath, `${eventsPath}.old`);
     fs.writeFileSync(
       eventsPath,
@@ -375,14 +436,15 @@ describe('PiCrewEventWatcher', () => {
 
     (watcher as unknown as { poll: () => void }).poll();
 
+    expect(await waitUntil(() => captured.length === 6)).toBe(true);
     expect(captured.slice(-2).map((payload) => payload.hook_event_name)).toEqual([
       'CrewSessionStart',
       'CrewPlanStart',
     ]);
-    watcher.stop();
+    await watcher.stop();
   });
 
-  it('stores confirmed source event IDs and suppresses them after rotation', () => {
+  it('stores confirmed source event IDs and suppresses them after rotation', async () => {
     const { eventsPath } = writeRun(tempDir, 'dedupe-run', [
       {
         time: '2026-08-22T00:00:00.000Z',
@@ -395,6 +457,8 @@ describe('PiCrewEventWatcher', () => {
     const captured: Record<string, unknown>[] = [];
     const watcher = createCapturingWatcher(tempDir, captured, store, () => true);
     watcher.start();
+    expect(await waitUntil(() => captured.length === 2)).toBe(true);
+    await watcher.waitForIdle();
     fs.renameSync(eventsPath, `${eventsPath}.old`);
     fs.writeFileSync(
       eventsPath,
@@ -403,14 +467,20 @@ describe('PiCrewEventWatcher', () => {
 
     (watcher as unknown as { poll: () => void }).poll();
 
+    expect(
+      await waitUntil(
+        () =>
+          store.load(createProjectScope(tempDir).key, 'dedupe-run')?.recentEventIds.length === 1,
+      ),
+    ).toBe(true);
     expect(store.load(createProjectScope(tempDir).key, 'dedupe-run')?.recentEventIds).toEqual([
       'fingerprint:same-source',
     ]);
     expect(captured).toHaveLength(2);
-    watcher.stop();
+    await watcher.stop();
   });
 
-  it('rolls back reader and lifecycle when checkpoint save fails, then replays with a diagnostic', () => {
+  it('rolls back reader and lifecycle when checkpoint save fails, then replays with a diagnostic', async () => {
     const { eventsPath } = writeRun(tempDir, 'save-failure-run', [
       { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'save-failure-run' },
     ]);
@@ -428,16 +498,16 @@ describe('PiCrewEventWatcher', () => {
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: store,
-      onEventDeliveryConfirmed: () => true,
       onDiagnostic: (message) => diagnostics.push(message),
+      outboxFactory: () => createCapturingOutbox(captured, () => true),
     });
-    (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook =
-      (payload) => captured.push(payload);
 
     watcher.start();
+    await watcher.waitForIdle();
     failSave = false;
     (watcher as unknown as { poll: () => void }).poll();
 
+    expect(await waitUntil(() => captured.length === 4)).toBe(true);
     expect(captured.map((payload) => payload.hook_event_name)).toEqual([
       'CrewSessionStart',
       'CrewPlanStart',
@@ -448,10 +518,10 @@ describe('PiCrewEventWatcher', () => {
       fs.statSync(eventsPath).size,
     );
     expect(diagnostics.join('\n')).toContain('checkpoint disk full');
-    watcher.stop();
+    await watcher.stop();
   });
 
-  it('silently reapplies a rotated planner before a new terminal event', () => {
+  it('silently reapplies a rotated planner before a new terminal event', async () => {
     const { eventsPath } = writeRun(tempDir, 'silent-rotation', [
       {
         time: '2026-08-22T00:00:00.000Z',
@@ -464,6 +534,8 @@ describe('PiCrewEventWatcher', () => {
     const captured: Record<string, unknown>[] = [];
     const watcher = createCapturingWatcher(tempDir, captured, store, () => true);
     watcher.start();
+    expect(await waitUntil(() => captured.length === 2)).toBe(true);
+    await watcher.waitForIdle();
     fs.renameSync(eventsPath, `${eventsPath}.old`);
     fs.writeFileSync(
       eventsPath,
@@ -487,14 +559,16 @@ describe('PiCrewEventWatcher', () => {
 
     (watcher as unknown as { poll: () => void }).poll();
 
+    await watcher.waitForIdle();
+    expect(captured).toHaveLength(4);
     expect(captured.slice(-2).map((payload) => payload.hook_event_name)).toEqual([
       'CrewPlanDone',
       'CrewSessionEnd',
     ]);
-    watcher.stop();
+    await watcher.stop();
   });
 
-  it('namespaces fingerprint, sequence, and content-hash checkpoint IDs', () => {
+  it('namespaces fingerprint, sequence, and content-hash checkpoint IDs', async () => {
     writeRun(tempDir, 'id-namespace-run', [
       {
         time: '2026-08-22T00:00:00.000Z',
@@ -521,10 +595,17 @@ describe('PiCrewEventWatcher', () => {
 
     watcher.start();
 
+    expect(
+      await waitUntil(
+        () =>
+          store.load(createProjectScope(tempDir).key, 'id-namespace-run')?.recentEventIds.length ===
+          3,
+      ),
+    ).toBe(true);
     expect(store.load(createProjectScope(tempDir).key, 'id-namespace-run')?.recentEventIds).toEqual(
       ['fingerprint:id-namespace-run:1', 'seq:id-namespace-run:1', expect.stringMatching(/^hash:/)],
     );
-    watcher.stop();
+    await watcher.stop();
   });
 
   it.each(['{not-json}\n', '{"time":"2026-08-22T00:00:02.000Z"'])(
@@ -574,15 +655,47 @@ function createCapturingWatcher(
     serverUrl: 'http://127.0.0.1:1234',
     authToken: 'test-token',
     checkpointStore,
-    onEventDeliveryConfirmed: () => {
-      const confirmation = confirmations[Math.min(confirmationIndex, confirmations.length - 1)];
-      if (typeof confirmation === 'function') return confirmation();
-      confirmationIndex += 1;
-      return confirmation === true;
-    },
+    outboxFactory: () =>
+      createCapturingOutbox(captured, () => {
+        const confirmation = confirmations[Math.min(confirmationIndex, confirmations.length - 1)];
+        if (typeof confirmation === 'function') return confirmation();
+        confirmationIndex += 1;
+        return confirmation === true;
+      }),
   });
-  (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook = (
-    payload,
-  ) => captured.push(payload);
   return watcher;
+}
+
+function createCapturingOutbox(
+  captured: Record<string, unknown>[],
+  isConfirmed: () => boolean,
+): {
+  enqueue: (item: HookOutboxItem) => Promise<HookDeliveryResult>;
+  drain: () => Promise<boolean>;
+} {
+  return {
+    enqueue: (item) => {
+      captured.push(...item.payloads.map((payload) => payload.body));
+      return Promise.resolve(
+        isConfirmed()
+          ? { outcome: 'success', attempts: item.payloads.length, permanentFailures: 0 }
+          : { outcome: 'retryable_failure', attempts: item.payloads.length, permanentFailures: 0 },
+      );
+    },
+    drain: async () => true,
+  };
+}
+
+async function waitUntil(predicate: () => boolean, timeoutMs = 250): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return true;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  return predicate();
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  return { promise: new Promise<T>((done) => (resolve = done)), resolve };
 }

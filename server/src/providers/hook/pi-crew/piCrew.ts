@@ -129,7 +129,7 @@ function formatToolStatus(toolName: string, input?: unknown): string {
 
 async function installHooks(serverUrl: string, authToken: string): Promise<void> {
   const projectDirs = [process.cwd()];
-  eventWatcher?.stop();
+  await eventWatcher?.stop();
   eventWatcher = new PiCrewEventWatcher({
     projectDirs,
     serverUrl,
@@ -142,7 +142,7 @@ async function installHooks(serverUrl: string, authToken: string): Promise<void>
 
 async function uninstallHooks(): Promise<void> {
   if (!eventWatcher) return;
-  eventWatcher.stop();
+  await eventWatcher.stop();
   eventWatcher = null;
   console.log('[Pixel Agents] pi-crew: hooks uninstalled, event watcher stopped');
 }

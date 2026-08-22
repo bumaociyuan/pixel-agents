@@ -17,14 +17,13 @@
 
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
-import * as http from 'node:http';
-import * as https from 'node:https';
 import * as path from 'node:path';
 
 import { createProjectScope, type ProjectScope } from '../../../../../core/src/projectScope.js';
 import { readConfig } from '../../../configPersistence.js';
-import { PI_CREW_FEED_POLL_MS } from './constants.js';
+import { PI_CREW_FEED_POLL_MS, PI_CREW_HOOK_DRAIN_TIMEOUT_MS } from './constants.js';
 import type { PiCrewEvent } from './feedTypes.js';
+import { type HookDeliveryResult, HookOutbox, type HookOutboxLike } from './hookOutbox.js';
 import { IncrementalJsonlReader } from './jsonlReader.js';
 import { piCrewEventToHookPayloads } from './piCrew.js';
 import { PiCrewCheckpointStore } from './piCrewCheckpointStore.js';
@@ -41,15 +40,8 @@ export interface EventWatcherOptions {
   onNewProject?: (projectDir: string) => void;
   /** Durable Pixel Agents state, injected by tests or an embedding host. */
   checkpointStore?: PiCrewCheckpointStore;
-  /**
-   * Temporary confirmation seam until Task 5's durable outbox exists. Return true only after every
-   * payload from the source event is durably accepted; fire-and-forget HTTP has no confirmation and
-   * therefore cannot advance a checkpoint.
-   */
-  onEventDeliveryConfirmed?: (
-    event: PiCrewEvent,
-    payloads: readonly Record<string, unknown>[],
-  ) => boolean;
+  /** Creates an independent, ordered queue for each discovered pi-crew run. */
+  outboxFactory?: (runId: string) => HookOutboxLike;
   /** Observable diagnostics for checkpoint corruption, reader recovery, and uncertain history. */
   onDiagnostic?: (message: string) => void;
 }
@@ -62,6 +54,8 @@ interface WatchedRunState {
   projectKey: string;
   reader: IncrementalJsonlReader<PiCrewEvent>;
   lifecycle: RunLifecycleState;
+  outbox: HookOutboxLike;
+  processing: boolean;
   pendingTerminalOffset?: number;
 }
 
@@ -69,6 +63,7 @@ export class PiCrewEventWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
   /** eventsPath → independent reader and lifecycle state. */
   private runStates = new Map<string, WatchedRunState>();
+  private readonly processingTasks = new Set<Promise<void>>();
   /** Known project directories (for new-project detection). */
   private knownProjects = new Set<string>();
   private readonly checkpointStore: PiCrewCheckpointStore;
@@ -93,16 +88,30 @@ export class PiCrewEventWatcher {
   }
 
   /** Stop the poll loop. */
-  stop(): void {
+  async stop(): Promise<void> {
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
       console.log('[Pixel Agents] pi-crew: event watcher stopped');
     }
+    await Promise.all(
+      [...this.runStates.values()].map(async (state) => {
+        const drained = await state.outbox.drain(PI_CREW_HOOK_DRAIN_TIMEOUT_MS);
+        if (!drained) this.onDiagnostic(`hook outbox did not drain for ${state.eventsPath}`);
+      }),
+    );
+    await this.waitForIdle();
   }
 
   isRunning(): boolean {
     return this.interval !== null;
+  }
+
+  /** Wait until every run has finished processing records already observed by a poll. */
+  async waitForIdle(): Promise<void> {
+    while (this.processingTasks.size > 0) {
+      await Promise.all([...this.processingTasks]);
+    }
   }
 
   addProjectDir(dir: string): void {
@@ -119,11 +128,7 @@ export class PiCrewEventWatcher {
     }
     // Read new events from all tracked event logs
     for (const [eventsPath, state] of this.runStates) {
-      try {
-        this.readEvents(eventsPath, state);
-      } catch (error) {
-        this.onDiagnostic(`cannot process ${eventsPath}: ${errorMessage(error)}`);
-      }
+      this.processRun(eventsPath, state);
     }
     // Clean up completed runs that have been stale for a while
     this.pruneCompletedRuns();
@@ -189,6 +194,8 @@ export class PiCrewEventWatcher {
             projectKey: project.key,
             reader,
             lifecycle: createRunLifecycle(project, runId, cwd),
+            outbox: this.createOutbox(runId),
+            processing: false,
             pendingTerminalOffset: lastRecord.endOffset,
           };
         } else if (lastRecord && isTerminalRunEvent(lastRecord.value)) {
@@ -204,6 +211,8 @@ export class PiCrewEventWatcher {
         projectKey: project.key,
         reader,
         lifecycle: createRunLifecycle(project, runId, cwd),
+        outbox: this.createOutbox(runId),
+        processing: false,
       };
       this.runStates.set(eventsPath, state);
 
@@ -226,7 +235,19 @@ export class PiCrewEventWatcher {
 
   // ── Event reading ────────────────────────────────────────
 
-  private readEvents(_eventsPath: string, state: WatchedRunState): void {
+  private processRun(eventsPath: string, state: WatchedRunState): void {
+    if (state.processing) return;
+    state.processing = true;
+    const task = this.readEvents(eventsPath, state)
+      .catch((error) => this.onDiagnostic(`cannot process ${eventsPath}: ${errorMessage(error)}`))
+      .finally(() => {
+        state.processing = false;
+      });
+    this.processingTasks.add(task);
+    void task.finally(() => this.processingTasks.delete(task));
+  }
+
+  private async readEvents(_eventsPath: string, state: WatchedRunState): Promise<void> {
     if (state.pendingTerminalOffset !== undefined) {
       const checkpoint = state.reader.prepareCommit(state.pendingTerminalOffset);
       if (!checkpoint) {
@@ -261,7 +282,20 @@ export class PiCrewEventWatcher {
 
       const nextLifecycle = cloneLifecycle(state.lifecycle);
       const payloads = this.dispatchEvent(record.value, state, nextLifecycle);
-      if (this.opts.onEventDeliveryConfirmed?.(record.value, payloads) !== true) break;
+      let result: HookDeliveryResult;
+      try {
+        result = await state.outbox.enqueue({
+          eventId,
+          payloads: payloads.map((body, index) => ({
+            idempotencyKey: `${eventId}:${index}`,
+            body,
+          })),
+        });
+      } catch (error) {
+        this.onDiagnostic(`cannot enqueue hook event ${eventId}: ${errorMessage(error)}`);
+        break;
+      }
+      if (result.outcome === 'retryable_failure') break;
 
       const checkpoint = state.reader.prepareCommit(record.endOffset, eventId);
       if (!checkpoint) break;
@@ -287,7 +321,6 @@ export class PiCrewEventWatcher {
       if (preferredArea && payload.hook_event_name === 'CrewSessionStart') {
         payload.preferred_area = preferredArea;
       }
-      this.postToHook(payload);
     }
     return payloads;
   }
@@ -337,35 +370,13 @@ export class PiCrewEventWatcher {
     return undefined;
   }
 
-  private postToHook(payload: Record<string, unknown>): void {
-    const body = JSON.stringify(payload);
-    const url = new URL(`/api/hooks/${encodeURIComponent('pi-crew')}`, this.opts.serverUrl);
-
-    const transport = url.protocol === 'https:' ? https : http;
-    const req = transport.request(
-      {
-        hostname: url.hostname,
-        port: url.port || (url.protocol === 'https:' ? 443 : 80),
-        path: url.pathname,
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(body),
-          Authorization: `Bearer ${this.opts.authToken}`,
-        },
-      },
-      (res: import('node:http').IncomingMessage) => {
-        res.resume();
-        if (res.statusCode !== 200 && res.statusCode !== 204) {
-          console.log(`[Pixel Agents] pi-crew: hook POST returned ${res.statusCode}`);
-        }
-      },
-    );
-    req.on('error', (e: Error) => {
-      console.log(`[Pixel Agents] pi-crew: hook POST error: ${e.message}`);
+  private createOutbox(runId: string): HookOutboxLike {
+    if (this.opts.outboxFactory) return this.opts.outboxFactory(runId);
+    return new HookOutbox({
+      serverUrl: this.opts.serverUrl,
+      authToken: this.opts.authToken,
+      onDiagnostic: this.onDiagnostic,
     });
-    req.write(body);
-    req.end();
   }
 }
 

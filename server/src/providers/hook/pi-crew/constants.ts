@@ -10,6 +10,18 @@ export const PI_CREW_DISPLAY_NAME = 'pi-crew';
  *  frequent than Claude tool calls, so a slower poll is fine. */
 export const PI_CREW_FEED_POLL_MS = 2000;
 
+/** Per-request deadline for the reliable pi-crew hook outbox. */
+export const PI_CREW_HOOK_REQUEST_TIMEOUT_MS = 10_000;
+
+/** Maximum attempts for a retryable hook delivery before it remains pending for a later poll. */
+export const PI_CREW_HOOK_MAX_ATTEMPTS = 5;
+
+/** Initial exponential-backoff delay for retryable hook delivery. */
+export const PI_CREW_HOOK_BACKOFF_BASE_MS = 250;
+
+/** Bound used while draining a watcher during shutdown. */
+export const PI_CREW_HOOK_DRAIN_TIMEOUT_MS = 5_000;
+
 /** State subdirectory below Pixel Agents' local state root for durable pi-crew reads. */
 export const PI_CREW_CHECKPOINTS_DIR = 'pi-crew/checkpoints';
 
