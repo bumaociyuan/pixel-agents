@@ -2,9 +2,13 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
-import { buildAgentDiagnostics } from '../src/agentDiagnostics.js';
+import {
+  buildAgentDiagnostics,
+  clearPiCrewDiagnosticsForTests,
+  recordPiCrewDiagnostic,
+} from '../src/agentDiagnostics.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import type { AgentState } from '../src/types.js';
 
@@ -52,6 +56,10 @@ describe('buildAgentDiagnostics', () => {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   });
 
+  afterEach(() => {
+    clearPiCrewDiagnosticsForTests();
+  });
+
   it('emits the exact 9-field shape for an agent with an existing jsonl file', () => {
     const store = new AgentStateStore();
     store.set(
@@ -66,7 +74,8 @@ describe('buildAgentDiagnostics', () => {
       }),
     );
 
-    const [entry] = buildAgentDiagnostics(store);
+    const { agents } = buildAgentDiagnostics(store);
+    const [entry] = agents;
 
     expect(Object.keys(entry).sort()).toEqual(
       [
@@ -105,7 +114,8 @@ describe('buildAgentDiagnostics', () => {
       }),
     );
 
-    const [entry] = buildAgentDiagnostics(store);
+    const { agents } = buildAgentDiagnostics(store);
+    const [entry] = agents;
 
     expect(entry.jsonlExists).toBe(false);
     expect(entry.fileSize).toBe(0);
@@ -119,8 +129,40 @@ describe('buildAgentDiagnostics', () => {
     store.set(1, createTestAgent({ id: 1, jsonlFile: realJsonl }));
     store.set(2, createTestAgent({ id: 2, jsonlFile: realJsonl }));
 
-    const entries = buildAgentDiagnostics(store);
+    const { agents: entries } = buildAgentDiagnostics(store);
 
     expect(entries.map((e) => e.id).sort()).toEqual([1, 2]);
+  });
+
+  it('exposes bounded, rate-limited pi-crew diagnostics without bearer tokens', () => {
+    const store = new AgentStateStore();
+    for (let index = 0; index < 64; index += 1) {
+      recordPiCrewDiagnostic({ category: 'delivery', message: `permanent failure ${index}` });
+    }
+    recordPiCrewDiagnostic({
+      category: 'reader',
+      projectKey: 'path:project',
+      runId: 'run-1',
+      file: '/tmp/project/events.jsonl',
+      offset: 42,
+      eventId: 'seq:run-1:4',
+      message: 'malformed JSON; Authorization: Bearer secret-token',
+    });
+    recordPiCrewDiagnostic({
+      category: 'reader',
+      projectKey: 'path:project',
+      runId: 'run-1',
+      file: '/tmp/project/events.jsonl',
+      offset: 42,
+      eventId: 'seq:run-1:4',
+      message: 'malformed JSON; Authorization: Bearer secret-token',
+    });
+
+    const report = buildAgentDiagnostics(store);
+
+    expect(report.agents).toEqual([]);
+    expect(report.piCrewDiagnostics).toHaveLength(50);
+    expect(report.piCrewDiagnostics.some((diagnostic) => diagnostic.count === 2)).toBe(true);
+    expect(JSON.stringify(report.piCrewDiagnostics)).not.toContain('secret-token');
   });
 });

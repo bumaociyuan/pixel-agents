@@ -107,7 +107,7 @@ export function handleClientMessage(
 
     case 'requestDiagnostics':
       // Point-to-point reply to the requesting socket (NOT a broadcast).
-      send({ type: 'agentDiagnostics', agents: buildAgentDiagnostics(store) });
+      send({ type: 'agentDiagnostics', ...buildAgentDiagnostics(store) });
       break;
 
     case 'saveLayout':

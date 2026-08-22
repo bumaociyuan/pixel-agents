@@ -24,6 +24,7 @@ import {
   dedupeProjectScopes,
   type ProjectScope,
 } from '../../../../../core/src/projectScope.js';
+import { recordPiCrewDiagnostic } from '../../../agentDiagnostics.js';
 import { readConfig } from '../../../configPersistence.js';
 import { getProjectAreaLabels } from '../pi-agent/autoRoom.js';
 import { PI_CREW_FEED_POLL_MS, PI_CREW_HOOK_DRAIN_TIMEOUT_MS } from './constants.js';
@@ -89,7 +90,10 @@ export class PiCrewEventWatcher {
     this.onDiagnostic =
       opts.onDiagnostic ?? ((message) => console.warn(`[Pixel Agents] pi-crew: ${message}`));
     this.checkpointStore =
-      opts.checkpointStore ?? new PiCrewCheckpointStore({ onDiagnostic: this.onDiagnostic });
+      opts.checkpointStore ??
+      new PiCrewCheckpointStore({
+        onDiagnostic: (message) => this.reportDiagnostic('checkpoint', message),
+      });
     this.projectScopes = this.normalizeProjectScopes(opts.projectScopes);
   }
 
@@ -208,7 +212,12 @@ export class PiCrewEventWatcher {
       let state: WatchedRunState | undefined;
       const reader = new IncrementalJsonlReader<PiCrewEvent>(eventsPath, {
         checkpoint: checkpoint ?? undefined,
-        onDiagnostic: this.onDiagnostic,
+        onDiagnostic: (message) =>
+          this.reportDiagnostic('reader', message, {
+            projectKey: project.key,
+            runId,
+            file: eventsPath,
+          }),
         onReset: () => {
           if (state) state.lifecycle = createRunLifecycle(state.project, state.runId, state.cwd);
         },
@@ -230,7 +239,7 @@ export class PiCrewEventWatcher {
             projectKey: project.key,
             reader,
             lifecycle: createRunLifecycle(project, runId, cwd),
-            outbox: this.createOutbox(runId),
+            outbox: this.createOutbox(runId, { projectKey: project.key, file: eventsPath }),
             processing: false,
             enqueueSafe: true,
             projectAreaLabels: this.resolveProjectAreaLabels(project),
@@ -249,7 +258,7 @@ export class PiCrewEventWatcher {
         projectKey: project.key,
         reader,
         lifecycle: createRunLifecycle(project, runId, cwd),
-        outbox: this.createOutbox(runId),
+        outbox: this.createOutbox(runId, { projectKey: project.key, file: eventsPath }),
         processing: false,
         enqueueSafe: true,
         projectAreaLabels: this.resolveProjectAreaLabels(project),
@@ -279,7 +288,13 @@ export class PiCrewEventWatcher {
     if (this.stopping || state.processing) return;
     state.processing = true;
     const task = this.readEvents(eventsPath, state)
-      .catch((error) => this.onDiagnostic(`cannot process ${eventsPath}: ${errorMessage(error)}`))
+      .catch((error) =>
+        this.reportDiagnostic('reader', `cannot process ${eventsPath}: ${errorMessage(error)}`, {
+          projectKey: state.projectKey,
+          runId: state.runId,
+          file: eventsPath,
+        }),
+      )
       .finally(() => {
         state.processing = false;
         this.pruneCompletedRuns();
@@ -292,14 +307,24 @@ export class PiCrewEventWatcher {
     if (state.pendingTerminalOffset !== undefined) {
       const checkpoint = state.reader.prepareCommit(state.pendingTerminalOffset);
       if (!checkpoint) {
-        this.onDiagnostic(`cannot prepare terminal checkpoint for ${state.eventsPath}`);
+        this.reportDiagnostic(
+          'checkpoint',
+          `cannot prepare terminal checkpoint for ${state.eventsPath}`,
+          {
+            projectKey: state.projectKey,
+            runId: state.runId,
+            file: state.eventsPath,
+          },
+        );
         return;
       }
       try {
         this.checkpointStore.save(state.projectKey, state.runId, checkpoint);
       } catch (error) {
-        this.onDiagnostic(
+        this.reportDiagnostic(
+          'checkpoint',
           `cannot save terminal checkpoint for ${state.eventsPath}: ${errorMessage(error)}`,
+          { projectKey: state.projectKey, runId: state.runId, file: state.eventsPath },
         );
         return;
       }
@@ -339,7 +364,16 @@ export class PiCrewEventWatcher {
         this.markEnqueueSafe(state);
         result = await delivery;
       } catch (error) {
-        this.onDiagnostic(`cannot enqueue hook event ${eventId}: ${errorMessage(error)}`);
+        this.reportDiagnostic(
+          'delivery',
+          `cannot enqueue hook event ${eventId}: ${errorMessage(error)}`,
+          {
+            projectKey: state.projectKey,
+            runId: state.runId,
+            file: state.eventsPath,
+            eventId,
+          },
+        );
         break;
       } finally {
         this.markEnqueueSafe(state);
@@ -426,12 +460,30 @@ export class PiCrewEventWatcher {
     return [];
   }
 
-  private createOutbox(runId: string): HookOutboxLike {
+  private reportDiagnostic(
+    category: 'reader' | 'delivery' | 'checkpoint' | 'migration' | 'watcher',
+    message: string,
+    context: {
+      projectKey?: string;
+      runId?: string;
+      file?: string;
+      offset?: number;
+      eventId?: string;
+    } = {},
+  ): void {
+    recordPiCrewDiagnostic({ category, message, ...context });
+    this.onDiagnostic(message);
+  }
+
+  private createOutbox(
+    runId: string,
+    context: { projectKey: string; file: string },
+  ): HookOutboxLike {
     if (this.opts.outboxFactory) return this.opts.outboxFactory(runId);
     return new HookOutbox({
       serverUrl: this.opts.serverUrl,
       authToken: this.opts.authToken,
-      onDiagnostic: this.onDiagnostic,
+      onDiagnostic: (message) => this.reportDiagnostic('delivery', message, { ...context, runId }),
     });
   }
 

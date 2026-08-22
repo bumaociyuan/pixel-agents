@@ -13,6 +13,8 @@ in the office.
 Each pi-crew worker gets its own character that shows its current task and role.
 Task progress, blocks, and completions are reflected in real time.
 
-No data is sent anywhere. The event log is read locally from your project directory.
+No data is sent anywhere. The event log is read locally from your project directory. If a
+local read or delivery fails, Pixel Agents keeps a bounded diagnostic record with project/run
+metadata for troubleshooting; it never includes your hook bearer token.
 
 You can disable this at any time from the Settings panel.`;

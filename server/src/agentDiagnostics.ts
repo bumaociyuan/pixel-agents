@@ -19,6 +19,56 @@ export interface AgentDiagnosticsEntry {
   linesProcessed: number;
 }
 
+export interface PiCrewDiagnosticInput {
+  category: 'reader' | 'delivery' | 'checkpoint' | 'migration' | 'watcher';
+  message: string;
+  projectKey?: string;
+  runId?: string;
+  file?: string;
+  offset?: number;
+  eventId?: string;
+}
+
+export interface PiCrewDiagnostic extends PiCrewDiagnosticInput {
+  count: number;
+  lastSeenAt: number;
+}
+
+export interface AgentDiagnosticsReport {
+  agents: AgentDiagnosticsEntry[];
+  piCrewDiagnostics: PiCrewDiagnostic[];
+}
+
+const MAX_PI_CREW_DIAGNOSTICS = 50;
+const piCrewDiagnostics: PiCrewDiagnostic[] = [];
+
+/** Retain a bounded, de-duplicated record of watcher failures for Debug View and support. */
+export function recordPiCrewDiagnostic(input: PiCrewDiagnosticInput): void {
+  const message = redactBearerToken(input.message);
+  const existing = piCrewDiagnostics.find(
+    (diagnostic) =>
+      diagnostic.category === input.category &&
+      diagnostic.message === message &&
+      diagnostic.projectKey === input.projectKey &&
+      diagnostic.runId === input.runId &&
+      diagnostic.file === input.file &&
+      diagnostic.offset === input.offset &&
+      diagnostic.eventId === input.eventId,
+  );
+  if (existing) {
+    existing.count += 1;
+    existing.lastSeenAt = Date.now();
+    return;
+  }
+  piCrewDiagnostics.push({ ...input, message, count: 1, lastSeenAt: Date.now() });
+  while (piCrewDiagnostics.length > MAX_PI_CREW_DIAGNOSTICS) piCrewDiagnostics.shift();
+}
+
+/** Test-only reset for the process-wide diagnostic ring buffer. */
+export function clearPiCrewDiagnosticsForTests(): void {
+  piCrewDiagnostics.length = 0;
+}
+
 /**
  * Build the connection-diagnostics payload for every agent in the store.
  *
@@ -29,8 +79,8 @@ export interface AgentDiagnosticsEntry {
  * `fs.existsSync`. `lastDataAt === 0` is a meaningful "never" sentinel and is
  * forwarded as-is.
  */
-export function buildAgentDiagnostics(store: AgentStateStore): AgentDiagnosticsEntry[] {
-  const diagnostics: AgentDiagnosticsEntry[] = [];
+export function buildAgentDiagnostics(store: AgentStateStore): AgentDiagnosticsReport {
+  const agents: AgentDiagnosticsEntry[] = [];
   for (const agent of store.values()) {
     let jsonlExists = false;
     let fileSize = 0;
@@ -41,7 +91,7 @@ export function buildAgentDiagnostics(store: AgentStateStore): AgentDiagnosticsE
     } catch {
       /* file doesn't exist */
     }
-    diagnostics.push({
+    agents.push({
       id: agent.id,
       projectDir: agent.projectDir,
       projectDirExists: fs.existsSync(agent.projectDir),
@@ -53,5 +103,12 @@ export function buildAgentDiagnostics(store: AgentStateStore): AgentDiagnosticsE
       linesProcessed: agent.linesProcessed,
     });
   }
-  return diagnostics;
+  return {
+    agents,
+    piCrewDiagnostics: piCrewDiagnostics.map((diagnostic) => ({ ...diagnostic })),
+  };
+}
+
+function redactBearerToken(message: string): string {
+  return message.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]');
 }

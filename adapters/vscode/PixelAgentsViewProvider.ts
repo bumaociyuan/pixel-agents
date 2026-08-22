@@ -868,7 +868,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         // Send connection diagnostics for all agents to the Debug View
         this.webview?.postMessage({
           type: 'agentDiagnostics',
-          agents: buildAgentDiagnostics(this.store),
+          ...buildAgentDiagnostics(this.store),
         });
       } else if (message.type === 'openSessionsFolder') {
         const projectDir = getProjectDirPath();

@@ -4,6 +4,8 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createProjectScope } from '../../core/src/projectScope.js';
+import { buildAgentDiagnostics, clearPiCrewDiagnosticsForTests } from '../src/agentDiagnostics.js';
+import { AgentStateStore } from '../src/agentStateStore.js';
 import { readConfig, writeConfig } from '../src/configPersistence.js';
 import type {
   HookDeliveryResult,
@@ -89,6 +91,44 @@ describe('PiCrewEventWatcher', () => {
     watcher.start();
     expect(newProjects).toHaveLength(0);
     watcher.stop();
+  });
+
+  it('records malformed JSONL diagnostics with reader context and without delivery secrets', async () => {
+    clearPiCrewDiagnosticsForTests();
+    const { eventsPath } = writeRun(tempDir, 'malformed-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'malformed-run' },
+    ]);
+    fs.appendFileSync(eventsPath, '{not-json}\n');
+    const watcher = new PiCrewEventWatcher({
+      projectScopes: [createProjectScope(tempDir)],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'must-not-appear',
+      outboxFactory: () => createCapturingOutbox([], () => true),
+      checkpointStore: new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      }),
+    });
+
+    watcher.start();
+    await watcher.waitForIdle();
+
+    const diagnostic = buildAgentDiagnostics(new AgentStateStore()).piCrewDiagnostics.find(
+      (entry) => entry.category === 'reader',
+    );
+    expect(diagnostic).toMatchObject({
+      projectKey: createProjectScope(tempDir).key,
+      runId: 'malformed-run',
+      file: path.join(
+        createProjectScope(tempDir).path,
+        '.crew',
+        'state',
+        'runs',
+        'malformed-run',
+        'events.jsonl',
+      ),
+    });
+    expect(JSON.stringify(diagnostic)).not.toContain('must-not-appear');
+    await watcher.stop();
   });
 
   it('deduplicates aliased scopes while keeping same-basename roots independent', async () => {
