@@ -50,9 +50,11 @@ describe('PiCrewCheckpointStore', () => {
 
   it('falls back safely and emits a diagnostic for a corrupt checkpoint', () => {
     const diagnostics: string[] = [];
+    const records: unknown[] = [];
     const store = new PiCrewCheckpointStore({
       rootDir: stateDir,
       onDiagnostic: (message) => diagnostics.push(message),
+      onDiagnosticRecord: (diagnostic) => records.push(diagnostic),
     });
     store.save('project-a', 'run-1', { committedOffset: 1, recentEventIds: [] });
     const [checkpointPath] = findCheckpointFiles(stateDir);
@@ -62,6 +64,12 @@ describe('PiCrewCheckpointStore', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain('project-a');
     expect(diagnostics[0]).toContain('run-1');
+    expect(records[0]).toMatchObject({
+      category: 'checkpoint',
+      projectKey: 'project-a',
+      runId: 'run-1',
+      file: checkpointPath,
+    });
   });
 
   it('uses a visible default diagnostic when no callback is injected', () => {

@@ -92,7 +92,8 @@ export class PiCrewEventWatcher {
     this.checkpointStore =
       opts.checkpointStore ??
       new PiCrewCheckpointStore({
-        onDiagnostic: (message) => this.reportDiagnostic('checkpoint', message),
+        onDiagnosticRecord: (diagnostic) =>
+          this.reportDiagnostic(diagnostic.category, diagnostic.message, diagnostic),
       });
     this.projectScopes = this.normalizeProjectScopes(opts.projectScopes);
   }
@@ -212,11 +213,12 @@ export class PiCrewEventWatcher {
       let state: WatchedRunState | undefined;
       const reader = new IncrementalJsonlReader<PiCrewEvent>(eventsPath, {
         checkpoint: checkpoint ?? undefined,
-        onDiagnostic: (message) =>
+        onDiagnosticRecord: ({ message, offset }) =>
           this.reportDiagnostic('reader', message, {
             projectKey: project.key,
             runId,
             file: eventsPath,
+            offset,
           }),
         onReset: () => {
           if (state) state.lifecycle = createRunLifecycle(state.project, state.runId, state.cwd);
@@ -471,8 +473,8 @@ export class PiCrewEventWatcher {
       eventId?: string;
     } = {},
   ): void {
-    recordPiCrewDiagnostic({ category, message, ...context });
-    this.onDiagnostic(message);
+    const result = recordPiCrewDiagnostic({ category, message, ...context });
+    if (this.opts.onDiagnostic || result.shouldEmit) this.onDiagnostic(result.diagnostic.message);
   }
 
   private createOutbox(

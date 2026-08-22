@@ -10,7 +10,16 @@ export interface PiCrewCheckpointStoreOptions {
   /** Pixel Agents state directory. Checkpoints are never stored in the watched project. */
   rootDir?: string;
   onDiagnostic?: (message: string) => void;
+  onDiagnosticRecord?: (diagnostic: PiCrewCheckpointDiagnostic) => void;
   fileSystem?: CheckpointFileSystem;
+}
+
+export interface PiCrewCheckpointDiagnostic {
+  category: 'checkpoint';
+  message: string;
+  projectKey: string;
+  runId: string;
+  file: string;
 }
 
 interface CheckpointFileSystem {
@@ -112,6 +121,13 @@ export class PiCrewCheckpointStore {
 
   private reportDiagnostic(projectKey: string, runId: string, detail: string): void {
     const message = `pi-crew checkpoint [project=${projectKey} run=${runId}]: ${detail}`;
+    this.options.onDiagnosticRecord?.({
+      category: 'checkpoint',
+      message,
+      projectKey,
+      runId,
+      file: this.checkpointPath(projectKey, runId),
+    });
     (this.options.onDiagnostic ?? console.warn)(message);
   }
 }

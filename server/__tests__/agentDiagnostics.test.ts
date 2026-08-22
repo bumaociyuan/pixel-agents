@@ -165,4 +165,32 @@ describe('buildAgentDiagnostics', () => {
     expect(report.piCrewDiagnostics.some((diagnostic) => diagnostic.count === 2)).toBe(true);
     expect(JSON.stringify(report.piCrewDiagnostics)).not.toContain('secret-token');
   });
+
+  it.each([
+    ['Authorization: Bearer secret-token', 'secret-token'],
+    ['{"authToken":"token-1","nested":{"apiKey":"token-2"}}', 'token-2'],
+    ['https://example.test/hook?access_token=token-3&ok=1', 'token-3'],
+    ['authorization=token-4 authToken: token-5', 'token-5'],
+    ['Cookie: session=token-6; Set-Cookie: refresh=token-7', 'token-7'],
+  ])('redacts sensitive diagnostic text: %s', (message, secret) => {
+    const result = recordPiCrewDiagnostic({ category: 'delivery', message });
+
+    expect(result.diagnostic.message).not.toContain(secret);
+    expect(result.diagnostic.message).toContain('[redacted]');
+  });
+
+  it('returns rate-limit state while preserving a repeated diagnostic count', () => {
+    const first = recordPiCrewDiagnostic({
+      category: 'reader',
+      message: 'persistent read failure',
+    });
+    const repeated = recordPiCrewDiagnostic({
+      category: 'reader',
+      message: 'persistent read failure',
+    });
+
+    expect(first).toMatchObject({ isNew: true, shouldEmit: true });
+    expect(repeated).toMatchObject({ isNew: false, shouldEmit: false });
+    expect(repeated.diagnostic.count).toBe(2);
+  });
 });

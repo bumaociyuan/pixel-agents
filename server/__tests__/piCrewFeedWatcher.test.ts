@@ -127,6 +127,11 @@ describe('PiCrewEventWatcher', () => {
         'events.jsonl',
       ),
     });
+    expect(diagnostic?.offset).toBe(
+      Buffer.byteLength(
+        `${JSON.stringify({ time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'malformed-run' })}\n`,
+      ),
+    );
     expect(JSON.stringify(diagnostic)).not.toContain('must-not-appear');
     await watcher.stop();
   });

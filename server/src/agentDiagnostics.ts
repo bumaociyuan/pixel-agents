@@ -32,6 +32,13 @@ export interface PiCrewDiagnosticInput {
 export interface PiCrewDiagnostic extends PiCrewDiagnosticInput {
   count: number;
   lastSeenAt: number;
+  lastEmittedAt: number;
+}
+
+export interface PiCrewDiagnosticRecordResult {
+  diagnostic: PiCrewDiagnostic;
+  isNew: boolean;
+  shouldEmit: boolean;
 }
 
 export interface AgentDiagnosticsReport {
@@ -40,11 +47,13 @@ export interface AgentDiagnosticsReport {
 }
 
 const MAX_PI_CREW_DIAGNOSTICS = 50;
+const PI_CREW_DIAGNOSTIC_EMIT_INTERVAL_MS = 1_000;
 const piCrewDiagnostics: PiCrewDiagnostic[] = [];
 
 /** Retain a bounded, de-duplicated record of watcher failures for Debug View and support. */
-export function recordPiCrewDiagnostic(input: PiCrewDiagnosticInput): void {
+export function recordPiCrewDiagnostic(input: PiCrewDiagnosticInput): PiCrewDiagnosticRecordResult {
   const message = redactBearerToken(input.message);
+  const now = Date.now();
   const existing = piCrewDiagnostics.find(
     (diagnostic) =>
       diagnostic.category === input.category &&
@@ -57,11 +66,15 @@ export function recordPiCrewDiagnostic(input: PiCrewDiagnosticInput): void {
   );
   if (existing) {
     existing.count += 1;
-    existing.lastSeenAt = Date.now();
-    return;
+    existing.lastSeenAt = now;
+    const shouldEmit = now - existing.lastEmittedAt >= PI_CREW_DIAGNOSTIC_EMIT_INTERVAL_MS;
+    if (shouldEmit) existing.lastEmittedAt = now;
+    return { diagnostic: { ...existing }, isNew: false, shouldEmit };
   }
-  piCrewDiagnostics.push({ ...input, message, count: 1, lastSeenAt: Date.now() });
+  const diagnostic = { ...input, message, count: 1, lastSeenAt: now, lastEmittedAt: now };
+  piCrewDiagnostics.push(diagnostic);
   while (piCrewDiagnostics.length > MAX_PI_CREW_DIAGNOSTICS) piCrewDiagnostics.shift();
+  return { diagnostic: { ...diagnostic }, isNew: true, shouldEmit: true };
 }
 
 /** Test-only reset for the process-wide diagnostic ring buffer. */
@@ -110,5 +123,15 @@ export function buildAgentDiagnostics(store: AgentStateStore): AgentDiagnosticsR
 }
 
 function redactBearerToken(message: string): string {
-  return message.replace(/Bearer\s+\S+/gi, 'Bearer [redacted]');
+  const sensitiveKey = '(?:authorization|authToken|access_token|apiKey|cookie|set-cookie)';
+  return message
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .replace(new RegExp(`([?&]${sensitiveKey}=)[^&#\\s]+`, 'gi'), '$1[redacted]')
+    .replace(
+      new RegExp(`("${sensitiveKey}"\\s*:\\s*)"(?:[^"\\\\]|\\\\.)*"`, 'gi'),
+      '$1"[redacted]"',
+    )
+    .replace(new RegExp(`(${sensitiveKey}\\s*[=:]\\s*)[^\\s,;}&]+`, 'gi'), '$1[redacted]')
+    .replace(/(Cookie\s*:\s*)[^\r\n]+/gi, '$1[redacted]')
+    .replace(/(Set-Cookie\s*:\s*)[^\r\n]+/gi, '$1[redacted]');
 }

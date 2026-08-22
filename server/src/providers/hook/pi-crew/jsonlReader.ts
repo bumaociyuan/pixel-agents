@@ -41,7 +41,13 @@ export interface IncrementalJsonlReaderOptions {
   checkpoint?: JsonlCheckpoint;
   chunkSize?: number;
   onDiagnostic?: (message: string) => void;
+  onDiagnosticRecord?: (diagnostic: JsonlReaderDiagnostic) => void;
   onReset?: () => void;
+}
+
+export interface JsonlReaderDiagnostic {
+  message: string;
+  offset: number;
 }
 
 interface ObservedFile {
@@ -327,7 +333,9 @@ export class IncrementalJsonlReader<T> {
     const now = Date.now();
     if (now - this.lastDiagnosticAt < DIAGNOSTIC_INTERVAL_MS) return;
     this.lastDiagnosticAt = now;
-    this.options.onDiagnostic?.(`Malformed JSONL record at byte offset ${offset}`);
+    const message = `Malformed JSONL record at byte offset ${offset}`;
+    this.options.onDiagnostic?.(message);
+    this.options.onDiagnosticRecord?.({ message, offset });
   }
 }
 
