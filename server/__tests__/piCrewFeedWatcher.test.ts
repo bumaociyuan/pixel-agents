@@ -27,7 +27,7 @@ describe('PiCrewEventWatcher', () => {
   it('fires onNewProject when a new project directory is discovered', () => {
     const newProjects: string[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       onNewProject: (projectDir) => {
@@ -42,9 +42,7 @@ describe('PiCrewEventWatcher', () => {
     // Start the watcher (it will poll and discover the project)
     watcher.start();
 
-    // The watcher polls asynchronously; give it time to fire
-    // We expect onNewProject to be called with tempDir
-    expect(newProjects).toContain(tempDir);
+    expect(newProjects).toContain(createProjectScope(tempDir).path);
 
     watcher.stop();
   });
@@ -52,7 +50,7 @@ describe('PiCrewEventWatcher', () => {
   it('does not fire onNewProject for already-known project directories', () => {
     const newProjects: string[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       onNewProject: (projectDir) => {
@@ -65,7 +63,7 @@ describe('PiCrewEventWatcher', () => {
 
     // First poll: triggers onNewProject
     watcher.start();
-    expect(newProjects).toContain(tempDir);
+    expect(newProjects).toContain(createProjectScope(tempDir).path);
 
     // Second poll: should NOT trigger onNewProject again
     const beforeCount = newProjects.length;
@@ -78,7 +76,7 @@ describe('PiCrewEventWatcher', () => {
   it('handles missing .crew/state/runs/ directory gracefully', () => {
     const newProjects: string[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir], // tempDir has no .crew/ subdirectory
+      projectScopes: [createProjectScope(tempDir)], // tempDir has no .crew/ subdirectory
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       onNewProject: (projectDir) => {
@@ -92,9 +90,118 @@ describe('PiCrewEventWatcher', () => {
     watcher.stop();
   });
 
+  it('deduplicates aliased scopes while keeping same-basename roots independent', async () => {
+    const first = path.join(tempDir, 'one', 'frontend');
+    const second = path.join(tempDir, 'two', 'frontend');
+    writeRun(first, 'first-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'first-run' },
+    ]);
+    writeRun(second, 'second-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'second-run' },
+    ]);
+
+    const captured: Record<string, unknown>[] = [];
+    const discovered: string[] = [];
+    const watcher = new PiCrewEventWatcher({
+      projectScopes: [
+        createProjectScope(first, 'First frontend'),
+        createProjectScope(path.join(first, '..', 'frontend'), 'Aliased frontend'),
+        createProjectScope(second, 'Second frontend'),
+      ],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      onNewProject: (projectDir) => discovered.push(projectDir),
+      outboxFactory: () => createCapturingOutbox(captured, () => true),
+      checkpointStore: new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      }),
+    });
+
+    watcher.start();
+    await watcher.waitForIdle();
+
+    expect(discovered).toEqual([createProjectScope(first).path, createProjectScope(second).path]);
+    expect(
+      captured.filter((payload) => payload.hook_event_name === 'CrewSessionStart'),
+    ).toHaveLength(2);
+    expect(
+      new Set(
+        captured
+          .filter((payload) => payload.hook_event_name === 'CrewSessionStart')
+          .map((payload) => payload.session_id),
+      ),
+    ).toHaveLength(2);
+
+    await watcher.stop();
+  });
+
+  it('replaces scopes by draining removed runs and scanning added roots', async () => {
+    const removed = path.join(tempDir, 'removed');
+    const added = path.join(tempDir, 'added');
+    const { eventsPath: removedEventsPath } = writeRun(removed, 'removed-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'removed-run' },
+    ]);
+    writeRun(added, 'added-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'added-run' },
+    ]);
+
+    const captured: Record<string, unknown>[] = [];
+    let drains = 0;
+    let disposals = 0;
+    const watcher = new PiCrewEventWatcher({
+      projectScopes: [createProjectScope(removed)],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      checkpointStore: new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      }),
+      outboxFactory: () => ({
+        ...createCapturingOutbox(captured, () => true),
+        drain: async () => {
+          drains += 1;
+          return true;
+        },
+        dispose: () => {
+          disposals += 1;
+        },
+      }),
+    });
+
+    watcher.start();
+    await watcher.waitForIdle();
+    const initialPayloadCount = captured.length;
+
+    await watcher.replaceProjectScopes([createProjectScope(added)]);
+    await watcher.waitForIdle();
+
+    fs.appendFileSync(
+      removedEventsPath,
+      `${JSON.stringify({
+        time: '2026-08-22T00:00:01.000Z',
+        type: 'task.started',
+        runId: 'removed-run',
+        taskId: 'ignored-task',
+      })}\n`,
+    );
+    (watcher as unknown as { poll: () => void }).poll();
+    await watcher.waitForIdle();
+
+    expect(drains).toBe(1);
+    expect(disposals).toBe(1);
+    expect(captured).toHaveLength(initialPayloadCount + 2);
+    expect(captured.map((payload) => payload.session_id).some((id) => id === undefined)).toBe(
+      false,
+    );
+    expect(
+      (watcher as unknown as { runStates: Map<string, unknown> }).runStates.has(removedEventsPath),
+    ).toBe(false);
+
+    await watcher.stop();
+  });
+
   it('tracks discovered runs via scanRunsDir', () => {
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
     });
@@ -111,7 +218,7 @@ describe('PiCrewEventWatcher', () => {
 
   it('prunes a stale cancelled run', async () => {
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: new PiCrewCheckpointStore({
@@ -143,7 +250,7 @@ describe('PiCrewEventWatcher', () => {
   it('forwards a run mismatch diagnostic to hook normalization', () => {
     const captured: Record<string, unknown>[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       outboxFactory: () => createCapturingOutbox(captured, () => true),
@@ -226,7 +333,7 @@ describe('PiCrewEventWatcher', () => {
     const diagnostics: string[] = [];
     const captured: Record<string, unknown>[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: store,
@@ -326,7 +433,7 @@ describe('PiCrewEventWatcher', () => {
     const delivery = deferred<HookDeliveryResult>();
     const delivered: HookOutboxItem[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: store,
@@ -368,7 +475,7 @@ describe('PiCrewEventWatcher', () => {
     const releaseEnqueue = deferred<void>();
     let drainCalls = 0;
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: new PiCrewCheckpointStore({
@@ -413,7 +520,7 @@ describe('PiCrewEventWatcher', () => {
     let enqueueCalls = 0;
     let drainCalls = 0;
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: new PiCrewCheckpointStore({
@@ -462,7 +569,15 @@ describe('PiCrewEventWatcher', () => {
       await terminalEnqueued.promise;
 
       const states = (watcher as unknown as { runStates: Map<string, unknown> }).runStates;
-      expect(states.has(eventsPath)).toBe(true);
+      const canonicalEventsPath = path.join(
+        createProjectScope(tempDir).path,
+        '.crew',
+        'state',
+        'runs',
+        'prune-processing-run',
+        'events.jsonl',
+      );
+      expect(states.has(canonicalEventsPath)).toBe(true);
 
       await watcher.stop();
       expect(drainCalls).toBe(1);
@@ -607,7 +722,7 @@ describe('PiCrewEventWatcher', () => {
     const diagnostics: string[] = [];
     const captured: Record<string, unknown>[] = [];
     const watcher = new PiCrewEventWatcher({
-      projectDirs: [tempDir],
+      projectScopes: [createProjectScope(tempDir)],
       serverUrl: 'http://127.0.0.1:1234',
       authToken: 'test-token',
       checkpointStore: store,
@@ -764,7 +879,7 @@ function createCapturingWatcher(
 ): PiCrewEventWatcher {
   let confirmationIndex = 0;
   const watcher = new PiCrewEventWatcher({
-    projectDirs: [tempDir],
+    projectScopes: [createProjectScope(tempDir)],
     serverUrl: 'http://127.0.0.1:1234',
     authToken: 'test-token',
     checkpointStore,

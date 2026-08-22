@@ -48,6 +48,8 @@ export interface HookOutboxOptions {
 export interface HookOutboxLike {
   enqueue(item: HookOutboxItem): Promise<HookDeliveryResult>;
   drain(timeoutMs: number): Promise<boolean>;
+  /** Abort outstanding delivery when a containing project is removed. */
+  dispose?(): void;
 }
 
 type AttemptResult =

@@ -27,6 +27,7 @@ import {
 } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
+import { buildStandaloneProjectScopes } from './projectScopes.js';
 import { migrateAutoRoomConfig } from './providers/hook/pi-agent/autoRoom.js';
 import {
   claudeProvider,
@@ -257,6 +258,7 @@ async function main(): Promise<void> {
     // scanners grow per-provider awareness alongside the Settings UI.
     runtime.hooksEnabled.current = getHooksEnabled(claudeProvider.id);
     runtime.watchAllSessions.current = adapter.getSetting('pixel-agents.watchAllSessions', false);
+    piCrewProvider.setProjectScopes?.(buildStandaloneProjectScopes(process.cwd()));
 
     // Install hooks on startup if the persisted setting says so — gated on the
     // one-time consent to modify ~/.claude/settings.json.

@@ -1,5 +1,10 @@
 /** pi-crew hook provider. */
 
+import {
+  createProjectScope,
+  dedupeProjectScopes,
+  type ProjectScope,
+} from '../../../../../core/src/projectScope.js';
 import type { AgentEvent, HookProvider } from '../../../../../core/src/provider.js';
 import { autoCreateRoomForProject } from '../pi-agent/autoRoom.js';
 import { PI_CREW_CONSENT_DISCLOSURE, PI_CREW_CONSENT_HEADLINE } from './consentCopy.js';
@@ -21,6 +26,26 @@ export function piCrewEventToHookPayloads(
 }
 
 let eventWatcher: PiCrewEventWatcher | null = null;
+let projectScopes = [createProjectScope(process.cwd())];
+let scopeReplacement: Promise<void> = Promise.resolve();
+
+function setProjectScopes(scopes: readonly ProjectScope[]): void {
+  projectScopes = dedupeProjectScopes(
+    scopes.map((scope) => createProjectScope(scope.path, scope.displayName)),
+  );
+  if (!eventWatcher) return;
+
+  const watcher = eventWatcher;
+  scopeReplacement = scopeReplacement
+    .then(() => watcher.replaceProjectScopes(projectScopes))
+    .catch((error: unknown) => {
+      console.error(
+        `[Pixel Agents] pi-crew: cannot replace project scopes: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    });
+}
 
 function normalizeHookEvent(
   raw: Record<string, unknown>,
@@ -128,10 +153,9 @@ function formatToolStatus(toolName: string, input?: unknown): string {
 }
 
 async function installHooks(serverUrl: string, authToken: string): Promise<void> {
-  const projectDirs = [process.cwd()];
   await eventWatcher?.stop();
   eventWatcher = new PiCrewEventWatcher({
-    projectDirs,
+    projectScopes,
     serverUrl,
     authToken,
     onNewProject: (projectDir) => autoCreateRoomForProject(projectDir),
@@ -160,6 +184,7 @@ export const piCrewProvider: HookProvider = {
     headline: PI_CREW_CONSENT_HEADLINE,
     disclosure: PI_CREW_CONSENT_DISCLOSURE,
   }),
+  setProjectScopes,
   formatToolStatus,
   permissionExemptTools: new Set([PI_CREW_TOOL_NAMES.PLAN, PI_CREW_TOOL_NAMES.REVIEW]),
   subagentToolNames: new Set(),

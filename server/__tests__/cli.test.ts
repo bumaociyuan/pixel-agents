@@ -6,6 +6,7 @@ import * as path from 'path';
 import { describe, expect, it } from 'vitest';
 
 import { CliArgsError, parseArgs } from '../src/cli.js';
+import { buildStandaloneProjectScopes } from '../src/projectScopes.js';
 import { CLAUDE_HOOK_EVENTS } from '../src/providers/hook/claude/constants.js';
 
 const CLI_BUNDLE = path.join(__dirname, '../../dist/cli.js');
@@ -118,6 +119,14 @@ describe('parseArgs', () => {
   // 10. --host is parsed independently of --port
   it('parses --host', () => {
     expect(parseArgs(['--host', '0.0.0.0']).host).toBe('0.0.0.0');
+  });
+});
+
+describe('standalone project scope composition', () => {
+  it('supplies the invocation directory as its only pi-crew scope', () => {
+    expect(buildStandaloneProjectScopes('/projects/standalone')).toEqual([
+      expect.objectContaining({ path: '/projects/standalone', displayName: 'standalone' }),
+    ]);
   });
 });
 

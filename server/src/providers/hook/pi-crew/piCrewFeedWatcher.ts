@@ -19,7 +19,11 @@ import { createHash } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 
-import { createProjectScope, type ProjectScope } from '../../../../../core/src/projectScope.js';
+import {
+  createProjectScope,
+  dedupeProjectScopes,
+  type ProjectScope,
+} from '../../../../../core/src/projectScope.js';
 import { readConfig } from '../../../configPersistence.js';
 import { PI_CREW_FEED_POLL_MS, PI_CREW_HOOK_DRAIN_TIMEOUT_MS } from './constants.js';
 import type { PiCrewEvent } from './feedTypes.js';
@@ -30,8 +34,8 @@ import { PiCrewCheckpointStore } from './piCrewCheckpointStore.js';
 import { createRunLifecycle, type RunLifecycleState } from './piCrewLifecycle.js';
 
 export interface EventWatcherOptions {
-  /** Project directories to scan for .crew/state/runs/. */
-  projectDirs: string[];
+  /** Canonical workspace scopes to scan for .crew/state/runs/. */
+  projectScopes: readonly ProjectScope[];
   /** Hook server URL (e.g. http://127.0.0.1:3100). */
   serverUrl: string;
   /** Bearer token for the hook endpoint. */
@@ -71,8 +75,9 @@ export class PiCrewEventWatcher {
   private readonly processingTasks = new Set<Promise<void>>();
   private readonly unsafeEnqueueStates = new Set<WatchedRunState>();
   private readonly safePointWaiters = new Set<() => void>();
-  /** Known project directories (for new-project detection). */
+  /** Known project identities (for new-project detection). */
   private knownProjects = new Set<string>();
+  private projectScopes: ProjectScope[];
   private readonly checkpointStore: PiCrewCheckpointStore;
   private readonly onDiagnostic: (message: string) => void;
 
@@ -81,13 +86,14 @@ export class PiCrewEventWatcher {
       opts.onDiagnostic ?? ((message) => console.warn(`[Pixel Agents] pi-crew: ${message}`));
     this.checkpointStore =
       opts.checkpointStore ?? new PiCrewCheckpointStore({ onDiagnostic: this.onDiagnostic });
+    this.projectScopes = this.normalizeProjectScopes(opts.projectScopes);
   }
 
   /** Start polling pi-crew event logs. */
   start(): void {
     if (this.interval || this.stopping) return;
     console.log(
-      `[Pixel Agents] pi-crew: starting event watcher for ${this.opts.projectDirs.length} project(s)`,
+      `[Pixel Agents] pi-crew: starting event watcher for ${this.projectScopes.length} project(s)`,
     );
 
     this.interval = setInterval(() => this.poll(), PI_CREW_FEED_POLL_MS);
@@ -118,18 +124,41 @@ export class PiCrewEventWatcher {
     }
   }
 
-  addProjectDir(dir: string): void {
-    if (!this.opts.projectDirs.includes(dir)) {
-      this.opts.projectDirs.push(dir);
+  /** Atomically replace the active workspace roots and release removed run resources. */
+  async replaceProjectScopes(scopes: readonly ProjectScope[]): Promise<void> {
+    this.projectScopes = this.normalizeProjectScopes(scopes);
+    const activeKeys = new Set(this.projectScopes.map((scope) => scope.key));
+
+    await this.waitForEnqueueSafePoints();
+    await this.waitForIdle();
+
+    const removed = [...this.runStates.entries()].filter(
+      ([, state]) => !activeKeys.has(state.projectKey),
+    );
+    await Promise.all(
+      removed.map(async ([eventsPath, state]) => {
+        const drained = await state.outbox.drain(PI_CREW_HOOK_DRAIN_TIMEOUT_MS);
+        if (!drained) {
+          this.onDiagnostic(`hook outbox did not drain for removed project run ${eventsPath}`);
+        }
+        state.outbox.dispose?.();
+        this.runStates.delete(eventsPath);
+      }),
+    );
+
+    for (const projectKey of [...this.knownProjects]) {
+      if (!activeKeys.has(projectKey)) this.knownProjects.delete(projectKey);
     }
+
+    this.poll();
   }
 
   // ── Polling ──────────────────────────────────────────────
 
   private poll(): void {
     if (this.stopping) return;
-    for (const dir of this.opts.projectDirs) {
-      this.scanRunsDir(dir);
+    for (const scope of this.projectScopes) {
+      this.scanRunsDir(scope);
     }
     // Read new events from all tracked event logs
     for (const [eventsPath, state] of this.runStates) {
@@ -138,7 +167,8 @@ export class PiCrewEventWatcher {
   }
 
   /** Discover runs by scanning .crew/state/runs/. */
-  private scanRunsDir(projectDir: string): void {
+  private scanRunsDir(project: ProjectScope): void {
+    const projectDir = project.path;
     const runsDir = path.join(projectDir, '.crew', 'state', 'runs');
     let entries: fs.Dirent[];
     try {
@@ -148,8 +178,8 @@ export class PiCrewEventWatcher {
     }
 
     // Detect new project directories for auto-room creation
-    if (!this.knownProjects.has(projectDir)) {
-      this.knownProjects.add(projectDir);
+    if (!this.knownProjects.has(project.key)) {
+      this.knownProjects.add(project.key);
       console.log(`[Pixel Agents] pi-crew: new project detected: ${projectDir}`);
       this.opts.onNewProject?.(projectDir);
     }
@@ -170,7 +200,6 @@ export class PiCrewEventWatcher {
       }
 
       const cwd = this.resolveRunCwd(projectDir, runId, runsDir);
-      const project = createProjectScope(cwd);
       const checkpoint = this.checkpointStore.load(project.key, runId);
       let state: WatchedRunState | undefined;
       const reader = new IncrementalJsonlReader<PiCrewEvent>(eventsPath, {
@@ -392,6 +421,12 @@ export class PiCrewEventWatcher {
       authToken: this.opts.authToken,
       onDiagnostic: this.onDiagnostic,
     });
+  }
+
+  private normalizeProjectScopes(scopes: readonly ProjectScope[]): ProjectScope[] {
+    return dedupeProjectScopes(
+      scopes.map((scope) => createProjectScope(scope.path, scope.displayName)),
+    );
   }
 
   private async finishStopping(): Promise<void> {

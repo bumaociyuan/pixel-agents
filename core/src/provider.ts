@@ -7,6 +7,7 @@
  * speculation.
  */
 
+import type { ProjectScope } from './projectScope.js';
 import type { TeamProvider } from './teamProvider.js';
 
 // ── Normalized Events (all provider types produce these) ──────
@@ -98,6 +99,9 @@ export interface HookProvider {
    *  provider that installs anything must state its terms, and the gate ships these verbatim so no client copy can
    *  drift. */
   consentDisclosure(): { headline: string; disclosure: string };
+
+  /** Replace the workspace roots this provider should watch, when it supports project-scoped input. */
+  setProjectScopes?(scopes: readonly ProjectScope[]): void;
 
   /** Format tool status for display (e.g., "Read" -> "Reading foo.ts") */
   formatToolStatus(toolName: string, input?: unknown): string;

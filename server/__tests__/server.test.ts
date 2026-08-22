@@ -3,6 +3,8 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { watchVsCodeProjectScopes } from '../../adapters/vscode/projectScopes.js';
+
 // Use isolated temp HOME to avoid touching real ~/.pixel-agents/
 let tmpBase: string;
 let serverJsonDir: string;
@@ -340,5 +342,48 @@ describe('PixelAgentsServer', () => {
     );
 
     expect(received).toHaveLength(0);
+  });
+});
+
+describe('VS Code project scope composition', () => {
+  it('supplies all named folders initially and replaces them after workspace changes', () => {
+    const workspace = {
+      workspaceFolders: [
+        { uri: { fsPath: '/projects/customer/frontend' }, name: 'Customer app' },
+        { uri: { fsPath: '/projects/admin/frontend' }, name: 'Admin app' },
+      ],
+      onDidChangeWorkspaceFolders: vi.fn(),
+    };
+    let onChange: (() => void) | undefined;
+    const dispose = vi.fn();
+    workspace.onDidChangeWorkspaceFolders.mockImplementation((listener: () => void) => {
+      onChange = listener;
+      return { dispose };
+    });
+    const replacements: Array<Array<{ path: string; displayName: string }>> = [];
+
+    const subscription = watchVsCodeProjectScopes(workspace, (scopes) => {
+      replacements.push(scopes.map(({ path, displayName }) => ({ path, displayName })));
+    });
+
+    expect(replacements).toEqual([
+      [
+        { path: '/projects/customer/frontend', displayName: 'Customer app' },
+        { path: '/projects/admin/frontend', displayName: 'Admin app' },
+      ],
+    ]);
+
+    workspace.workspaceFolders = [
+      { uri: { fsPath: '/projects/admin/frontend' }, name: 'Admin app' },
+    ];
+    onChange?.();
+
+    expect(replacements).toHaveLength(2);
+    expect(replacements[1]).toEqual([
+      { path: '/projects/admin/frontend', displayName: 'Admin app' },
+    ]);
+
+    subscription.dispose();
+    expect(dispose).toHaveBeenCalledOnce();
   });
 });

@@ -74,6 +74,7 @@ import {
   GLOBAL_KEY_WATCH_ALL_SESSIONS,
   LAYOUT_REVISION_KEY,
 } from './constants.js';
+import { watchVsCodeProjectScopes } from './projectScopes.js';
 import { VscodeTerminalAdapter } from './vscodeTerminalAdapter.js';
 
 /** Cap on the pending-broadcast queue. If we exceed this, something has gone
@@ -115,6 +116,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   // Auto-spawn guard: ensures the startup spawn fires at most once per VS Code
   // session, even though webviewReady fires on every panel focus.
   private autoSpawnAttempted = false;
+  private readonly workspaceFolderListener: vscode.Disposable;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -146,6 +148,9 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
     });
 
     setTerminalAdapter(new VscodeTerminalAdapter());
+    this.workspaceFolderListener = watchVsCodeProjectScopes(vscode.workspace, (scopes) => {
+      piCrewProvider.setProjectScopes?.(scopes);
+    });
 
     // Map an external agent's cwd/projectDir to its WorkspaceFolder.name — the
     // identity areaMappings is keyed on — so in-area seat placement works. Multi-root only.
@@ -1065,6 +1070,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose() {
+    this.workspaceFolderListener.dispose();
     this.pixelAgentsServer?.stop();
     this.pixelAgentsServer = null;
     this.runtime.dispose();
