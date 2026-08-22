@@ -129,4 +129,79 @@ describe('IncrementalJsonlReader', () => {
     expect(first.readAvailable().map((record) => record.value.message)).toEqual(['first']);
     expect(second.readAvailable().map((record) => record.value.message)).toEqual(['second']);
   });
+
+  it('detects copytruncate replacement when its first 5 KB and inode are unchanged', () => {
+    const sharedPrefix = 'p'.repeat(5000);
+    const oldMessage = `${sharedPrefix}${'o'.repeat(18)}`;
+    const replacementMessage = `${sharedPrefix}${'n'.repeat(58)}`;
+    const oldLine = Buffer.from(`${JSON.stringify({ message: oldMessage })}\n`);
+    const replacementLine = Buffer.from(`${JSON.stringify({ message: replacementMessage })}\n`);
+    expect(oldLine).toHaveLength(5033);
+    expect(replacementLine).toHaveLength(5073);
+    expect(replacementLine.subarray(0, 5000)).toEqual(oldLine.subarray(0, 5000));
+    fs.writeFileSync(eventsPath, oldLine);
+    const reader = new IncrementalJsonlReader<{ message: string }>(eventsPath);
+    const oldRecord = reader.readAvailable()[0];
+    reader.commit(oldRecord!.endOffset);
+
+    fs.truncateSync(eventsPath, 0);
+    fs.writeFileSync(eventsPath, replacementLine);
+
+    expect(reader.readAvailable()).toEqual([
+      {
+        startOffset: 0,
+        endOffset: replacementLine.length,
+        value: { message: replacementMessage },
+      },
+    ]);
+  });
+
+  it('skips malformed UTF-8 without drifting later raw byte offsets', () => {
+    const diagnostics: string[] = [];
+    const malformedLine = Buffer.concat([
+      Buffer.from('{"message":"bad'),
+      Buffer.from([0x80]),
+      Buffer.from('"}\n'),
+    ]);
+    const validLine = Buffer.from('{"message":"ok"}\n');
+    fs.writeFileSync(eventsPath, Buffer.concat([malformedLine, validLine]));
+    const reader = new IncrementalJsonlReader<{ message: string }>(eventsPath, {
+      chunkSize: 2,
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+
+    expect(reader.readAvailable()).toEqual([
+      {
+        startOffset: malformedLine.length,
+        endOffset: malformedLine.length + validLine.length,
+        value: { message: 'ok' },
+      },
+    ]);
+    expect(diagnostics).toHaveLength(1);
+  });
+
+  it('round-trips opaque recent event IDs from its checkpoint', () => {
+    const recentEventIds = ['fingerprint-1', 'run-1:2'];
+    const reader = new IncrementalJsonlReader(eventsPath, {
+      checkpoint: { committedOffset: 0, recentEventIds },
+    });
+
+    expect(reader.snapshot().recentEventIds).toEqual(['fingerprint-1', 'run-1:2']);
+  });
+
+  it('commits only delivered complete-record offsets', () => {
+    const firstLine = Buffer.from('{"message":"first"}\n');
+    const secondLine = Buffer.from('{"message":"second"}\n');
+    fs.writeFileSync(eventsPath, Buffer.concat([firstLine, secondLine]));
+    const reader = new IncrementalJsonlReader<{ message: string }>(eventsPath);
+    const records = reader.readAvailable();
+
+    reader.commit(records[0]!.endOffset - 1);
+    reader.commit(records[0]!.endOffset + 1);
+    expect(reader.snapshot().committedOffset).toBe(0);
+
+    reader.commit(records[0]!.endOffset);
+    expect(reader.snapshot().committedOffset).toBe(firstLine.length);
+    expect(reader.readAvailable()).toEqual([records[1]]);
+  });
 });

@@ -1,9 +1,11 @@
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
+import { TextDecoder } from 'node:util';
 
 const DEFAULT_CHUNK_SIZE = 64 * 1024;
 const FINGERPRINT_BYTES = 4096;
+const COMMIT_ANCHOR_BYTES = 1024;
 const DIAGNOSTIC_INTERVAL_MS = 1000;
 
 export interface JsonlFileIdentity {
@@ -18,6 +20,13 @@ export interface JsonlCheckpoint {
   committedOffset: number;
   fileIdentity?: JsonlFileIdentity;
   recentEventIds: string[];
+  committedAnchor?: JsonlByteAnchor;
+}
+
+export interface JsonlByteAnchor {
+  offset: number;
+  length: number;
+  fingerprint: string;
 }
 
 export interface ParsedJsonlRecord<T> {
@@ -43,11 +52,14 @@ export class IncrementalJsonlReader<T> {
   private readOffset: number;
   private lineStartOffset: number;
   private fileIdentity?: JsonlFileIdentity;
-  private decoder = new StringDecoder('utf8');
-  private lineBuffer = '';
+  private committedAnchor?: JsonlByteAnchor;
+  private lineParts: Buffer[] = [];
+  private lineLength = 0;
   private records: ParsedJsonlRecord<T>[] = [];
   private lastDiagnosticAt = Number.NEGATIVE_INFINITY;
   private readonly chunkSize: number;
+  private readonly strictUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
+  private readonly recentEventIds: string[];
 
   constructor(
     private readonly filePath: string,
@@ -58,6 +70,8 @@ export class IncrementalJsonlReader<T> {
     this.readOffset = this.committedOffset;
     this.lineStartOffset = this.committedOffset;
     this.fileIdentity = checkpoint?.fileIdentity;
+    this.committedAnchor = checkpoint?.committedAnchor;
+    this.recentEventIds = [...(checkpoint?.recentEventIds ?? [])];
     this.chunkSize = options.chunkSize ?? DEFAULT_CHUNK_SIZE;
 
     if (!Number.isInteger(this.chunkSize) || this.chunkSize <= 0) {
@@ -82,9 +96,11 @@ export class IncrementalJsonlReader<T> {
   }
 
   commit(endOffset: number): void {
-    if (!Number.isInteger(endOffset) || endOffset < this.committedOffset) return;
+    if (!Number.isInteger(endOffset) || endOffset === this.committedOffset) return;
+    if (!this.records.some((record) => record.endOffset === endOffset)) return;
 
-    this.committedOffset = Math.min(endOffset, this.readOffset);
+    this.committedOffset = endOffset;
+    this.committedAnchor = this.captureAnchor(endOffset);
     this.records = this.records.filter((record) => record.endOffset > this.committedOffset);
   }
 
@@ -93,8 +109,9 @@ export class IncrementalJsonlReader<T> {
     this.readOffset = 0;
     this.lineStartOffset = 0;
     this.fileIdentity = undefined;
-    this.decoder = new StringDecoder('utf8');
-    this.lineBuffer = '';
+    this.committedAnchor = undefined;
+    this.lineParts = [];
+    this.lineLength = 0;
     this.records = [];
   }
 
@@ -102,7 +119,8 @@ export class IncrementalJsonlReader<T> {
     return {
       committedOffset: this.committedOffset,
       ...(this.fileIdentity ? { fileIdentity: { ...this.fileIdentity } } : {}),
-      recentEventIds: [],
+      ...(this.committedAnchor ? { committedAnchor: { ...this.committedAnchor } } : {}),
+      recentEventIds: [...this.recentEventIds],
     };
   }
 
@@ -147,7 +165,9 @@ export class IncrementalJsonlReader<T> {
 
     if (observed.size < previous.fingerprintLength) return true;
     const currentFingerprint = this.fingerprintForLength(previous.fingerprintLength);
-    return currentFingerprint !== previous.firstBlockFingerprint;
+    if (currentFingerprint !== previous.firstBlockFingerprint) return true;
+
+    return !this.matchesCommittedAnchor();
   }
 
   private fingerprintForLength(length: number): string {
@@ -173,36 +193,79 @@ export class IncrementalJsonlReader<T> {
         if (bytesRead === 0) break;
 
         this.readOffset += bytesRead;
-        this.consumeText(this.decoder.write(buffer.subarray(0, bytesRead)));
+        this.consumeBytes(buffer.subarray(0, bytesRead));
       }
     } finally {
       if (fd !== undefined) fs.closeSync(fd);
     }
   }
 
-  private consumeText(text: string): void {
-    this.lineBuffer += text;
+  private consumeBytes(bytes: Buffer): void {
+    let start = 0;
+    for (let index = 0; index < bytes.length; index += 1) {
+      if (bytes[index] !== 0x0a) continue;
 
-    let newlineIndex = this.lineBuffer.indexOf('\n');
-    while (newlineIndex !== -1) {
-      const line = this.lineBuffer.slice(0, newlineIndex);
-      const endOffset = this.lineStartOffset + Buffer.byteLength(line, 'utf8') + 1;
-      this.lineBuffer = this.lineBuffer.slice(newlineIndex + 1);
+      this.appendLinePart(bytes.subarray(start, index));
+      const lineBytes = Buffer.concat(this.lineParts, this.lineLength);
+      const endOffset = this.lineStartOffset + lineBytes.length + 1;
+      this.lineParts = [];
+      this.lineLength = 0;
 
-      if (line.trim()) {
-        try {
+      try {
+        const line = this.decodeUtf8(lineBytes);
+        if (line.trim()) {
           this.records.push({
             startOffset: this.lineStartOffset,
             endOffset,
             value: JSON.parse(line) as T,
           });
-        } catch {
-          this.reportMalformedLine(this.lineStartOffset);
         }
+      } catch {
+        this.reportMalformedLine(this.lineStartOffset);
       }
 
       this.lineStartOffset = endOffset;
-      newlineIndex = this.lineBuffer.indexOf('\n');
+      start = index + 1;
+    }
+
+    this.appendLinePart(bytes.subarray(start));
+  }
+
+  private appendLinePart(part: Buffer): void {
+    if (part.length === 0) return;
+    this.lineParts.push(part);
+    this.lineLength += part.length;
+  }
+
+  private decodeUtf8(lineBytes: Buffer): string {
+    this.strictUtf8Decoder.decode(lineBytes);
+    const decoder = new StringDecoder('utf8');
+    return decoder.write(lineBytes) + decoder.end();
+  }
+
+  private captureAnchor(endOffset: number): JsonlByteAnchor | undefined {
+    const offset = Math.max(0, endOffset - COMMIT_ANCHOR_BYTES);
+    const length = endOffset - offset;
+    const fingerprint = this.fingerprintRange(offset, length);
+    return fingerprint ? { offset, length, fingerprint } : undefined;
+  }
+
+  private matchesCommittedAnchor(): boolean {
+    if (!this.committedAnchor) return true;
+    const { offset, length, fingerprint } = this.committedAnchor;
+    return this.fingerprintRange(offset, length) === fingerprint;
+  }
+
+  private fingerprintRange(offset: number, length: number): string | undefined {
+    let fd: number | undefined;
+    try {
+      const buffer = Buffer.alloc(length);
+      fd = fs.openSync(this.filePath, 'r');
+      const bytesRead = fs.readSync(fd, buffer, 0, length, offset);
+      if (bytesRead !== length) return undefined;
+      return hash(buffer);
+    } finally {
+      if (fd !== undefined) fs.closeSync(fd);
     }
   }
 
