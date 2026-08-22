@@ -385,6 +385,9 @@ export class HookEventHandler {
       case 'progress':
         // Not yet consumed by the office visualization. Silently drop.
         return;
+      case 'diagnostic':
+        console.warn(`[Pixel Agents] Hook diagnostic (${normEvent.code})`, normEvent.data);
+        return;
     }
   }
 

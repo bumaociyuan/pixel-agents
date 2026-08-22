@@ -49,6 +49,7 @@ export type AgentEvent =
       reason: 'idle' | 'completed';
     }
   | { kind: 'progress'; toolId: string; data: unknown }
+  | { kind: 'diagnostic'; code: string; data: unknown }
   | { kind: 'permissionRequest' }
   | {
       kind: 'sessionStart';

@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { HookEventHandler } from '../src/hookEventHandler.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
+import { piCrewProvider } from '../src/providers/hook/pi-crew/piCrew.js';
 import { SessionRouter } from '../src/sessionRouter.js';
 import type { AgentState } from '../src/types.js';
 
@@ -68,6 +69,41 @@ describe('HookEventHandler', () => {
       [claudeProvider],
       new SessionRouter(),
     );
+  });
+
+  it('warns for pi-crew diagnostics without changing normal progress handling', () => {
+    const piCrewHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      [piCrewProvider],
+      new SessionRouter(),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      agents.set(1, createTestAgent({ id: 1 }));
+      piCrewHandler.registerAgent('crew-session', 1);
+
+      piCrewHandler.handleEvent('pi-crew', {
+        hook_event_name: 'CrewDiagnostic',
+        session_id: 'crew-session',
+        diagnostic_code: 'run_id_mismatch',
+        data: { eventRunId: 'other-run', stateRunId: 'run-1' },
+      });
+      piCrewHandler.handleEvent('pi-crew', {
+        hook_event_name: 'CrewProgress',
+        session_id: 'crew-session',
+        data: { turns: 1 },
+      });
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith('[Pixel Agents] Hook diagnostic (run_id_mismatch)', {
+        eventRunId: 'other-run',
+        stateRunId: 'run-1',
+      });
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   // ── PermissionRequest ───────────────────────────────────────
@@ -862,7 +898,7 @@ describe('HookEventHandler', () => {
     });
   });
 
-// ── preferredArea propagation ─────────────────────────────────
+  // ── preferredArea propagation ─────────────────────────────────
 
   it('confirmation event passes preferredArea to onExternalSessionDetected', async () => {
     const { piAgentProvider } = await import('../src/providers/hook/pi-agent/piAgent.js');

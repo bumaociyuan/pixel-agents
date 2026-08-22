@@ -39,8 +39,8 @@ describe('piCrewProvider', () => {
 
     expect(normalized?.sessionId).toContain('planner');
     expect(normalized?.event).toEqual({
-      kind: 'progress',
-      toolId: 'current',
+      kind: 'diagnostic',
+      code: 'run_id_mismatch',
       data: {
         eventRunId: 'other-run',
         reason: 'run_id_mismatch',

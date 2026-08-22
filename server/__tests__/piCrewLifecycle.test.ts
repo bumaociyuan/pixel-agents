@@ -4,6 +4,7 @@ import { createProjectScope } from '../../core/src/projectScope.js';
 import {
   applyPiCrewEvent,
   createRunLifecycle,
+  MAX_RECENT_PROGRESS_FINGERPRINTS,
 } from '../src/providers/hook/pi-crew/piCrewLifecycle.js';
 
 function taskStarted(
@@ -364,5 +365,25 @@ describe('pi-crew lifecycle', () => {
 
     expect(applyPiCrewEvent(state, first).map(eventName)).toEqual(['CrewProgress']);
     expect(applyPiCrewEvent(state, second).map(eventName)).toEqual(['CrewProgress']);
+  });
+
+  it('bounds progress replay fingerprints while suppressing recent duplicates', () => {
+    const state = run();
+    applyPiCrewEvent(state, taskStarted('t1', 'A'));
+
+    for (let seq = 0; seq <= MAX_RECENT_PROGRESS_FINGERPRINTS; seq += 1) {
+      const progress = lifecycleEvent('task.progress', 't1', { turns: seq });
+      progress.metadata = { seq };
+      applyPiCrewEvent(state, progress);
+    }
+    const recent = lifecycleEvent('task.progress', 't1', {
+      turns: MAX_RECENT_PROGRESS_FINGERPRINTS,
+    });
+    recent.metadata = { seq: MAX_RECENT_PROGRESS_FINGERPRINTS };
+
+    expect(state.seenProgressFingerprints.size).toBeLessThanOrEqual(
+      MAX_RECENT_PROGRESS_FINGERPRINTS,
+    );
+    expect(applyPiCrewEvent(state, recent)).toEqual([]);
   });
 });

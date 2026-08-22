@@ -6,6 +6,9 @@ import type { PiCrewEvent } from './feedTypes.js';
 
 export type HookPayload = Record<string, unknown>;
 
+/** Keep replay suppression bounded for long-running pi-crew runs. */
+export const MAX_RECENT_PROGRESS_FINGERPRINTS = 256;
+
 export interface AgentLifecycleState {
   key: string;
   name: string;
@@ -33,6 +36,7 @@ export interface RunLifecycleState {
   agents: Map<string, AgentLifecycleState>;
   tasks: Map<string, TaskLifecycleState>;
   seenProgressFingerprints: Set<string>;
+  recentProgressFingerprintOrder: string[];
   planner?: { agentKey: string; toolId: string; active: boolean };
   terminal: boolean;
 }
@@ -49,6 +53,7 @@ export function createRunLifecycle(
     agents: new Map(),
     tasks: new Map(),
     seenProgressFingerprints: new Set(),
+    recentProgressFingerprintOrder: [],
     terminal: false,
   };
 }
@@ -60,6 +65,7 @@ export function applyPiCrewEvent(state: RunLifecycleState, event: PiCrewEvent): 
         hook_event_name: 'CrewDiagnostic',
         session_id: agentSessionId(state, 'planner'),
         agent_name: 'planner',
+        diagnostic_code: 'run_id_mismatch',
         reason: 'run_id_mismatch',
         event_run_id: event.runId,
         state_run_id: state.runId,
@@ -239,8 +245,7 @@ function reportProgress(state: RunLifecycleState, event: PiCrewEvent): HookPaylo
   const agent = state.agents.get(task.agentKey);
   if (!agent) return [];
   const fingerprint = progressFingerprint(event, task);
-  if (state.seenProgressFingerprints.has(fingerprint)) return [];
-  state.seenProgressFingerprints.add(fingerprint);
+  if (isRecentProgressReplay(state, fingerprint)) return [];
   const payloads: HookPayload[] = [];
   if (task.blocked) {
     task.blocked = false;
@@ -499,6 +504,18 @@ function progressFingerprint(event: PiCrewEvent, task: TaskLifecycleState): stri
     message: event.message,
     data: event.data,
   })}`;
+}
+
+function isRecentProgressReplay(state: RunLifecycleState, fingerprint: string): boolean {
+  if (state.seenProgressFingerprints.has(fingerprint)) return true;
+
+  state.seenProgressFingerprints.add(fingerprint);
+  state.recentProgressFingerprintOrder.push(fingerprint);
+  if (state.recentProgressFingerprintOrder.length > MAX_RECENT_PROGRESS_FINGERPRINTS) {
+    const oldest = state.recentProgressFingerprintOrder.shift();
+    if (oldest) state.seenProgressFingerprints.delete(oldest);
+  }
+  return false;
 }
 
 function stableSerialize(value: unknown): string {

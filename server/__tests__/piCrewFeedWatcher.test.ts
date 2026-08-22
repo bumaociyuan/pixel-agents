@@ -153,7 +153,7 @@ describe('PiCrewEventWatcher', () => {
     watcher.start();
 
     expect(captured[0].hook_event_name).toBe('CrewDiagnostic');
-    expect(piCrewProvider.normalizeHookEvent(captured[0])?.event.kind).toBe('progress');
+    expect(piCrewProvider.normalizeHookEvent(captured[0])?.event.kind).toBe('diagnostic');
     watcher.stop();
   });
 });
