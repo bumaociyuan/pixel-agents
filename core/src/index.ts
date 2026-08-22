@@ -1,5 +1,4 @@
-// Core package: shared types, interfaces, and protocol definitions
-// Everything in this package is types-only (no runtime behavior)
+// Core package: shared types, interfaces, protocol definitions, and utilities.
 
 export type { StateAdapter } from './adapter.js';
 export {

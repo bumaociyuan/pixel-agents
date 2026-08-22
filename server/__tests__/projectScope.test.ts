@@ -1,3 +1,7 @@
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -22,6 +26,37 @@ describe('project scope identity', () => {
   it('canonicalizes paths before deriving identity', () => {
     expect(canonicalizeProjectPath('/tmp/work/../work')).toBe('/tmp/work');
     expect(projectKeyFromPath('/tmp/work/../work')).toBe(projectKeyFromPath('/tmp/work'));
+  });
+
+  it('resolves existing symbolic-link aliases to one identity', () => {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'project-scope-'));
+    const realProject = path.join(root, 'real-project');
+    const aliasProject = path.join(root, 'alias-project');
+
+    try {
+      mkdirSync(realProject);
+      symlinkSync(realProject, aliasProject, process.platform === 'win32' ? 'junction' : 'dir');
+
+      expect(canonicalizeProjectPath(aliasProject)).toBe(canonicalizeProjectPath(realProject));
+      expect(projectKeyFromPath(aliasProject)).toBe(projectKeyFromPath(realProject));
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it('folds path case when the platform is Windows', () => {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform');
+
+    try {
+      Object.defineProperty(process, 'platform', { configurable: true, value: 'win32' });
+
+      expect(canonicalizeProjectPath('/tmp/Project')).toBe(canonicalizeProjectPath('/tmp/project'));
+      expect(projectKeyFromPath('/tmp/Project')).toBe(projectKeyFromPath('/tmp/project'));
+    } finally {
+      if (platformDescriptor) {
+        Object.defineProperty(process, 'platform', platformDescriptor);
+      }
+    }
   });
 
   it('uses the basename as the default display name', () => {
