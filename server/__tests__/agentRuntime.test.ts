@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { AgentRuntime } from '../src/agentRuntime.js';
 import { AgentStateStore } from '../src/agentStateStore.js';
 import { claudeProvider } from '../src/providers/hook/claude/claude.js';
+import { piCrewProvider } from '../src/providers/hook/pi-crew/piCrew.js';
 
 /**
  * D5 gate (tier-3 multi-server hook fan-out plan): the hook script now
@@ -74,5 +75,32 @@ describe('AgentRuntime -- D5 foreign-session gate', () => {
     runtime.startProjectScan(dir); // marks `dir` as owned/tracked
     fireSessionStartThenStop('d5-tracked-dir', dir);
     expect(store.size).toBe(1);
+  });
+
+  it('stores pi-crew project identity and complete Area labels on the runtime agent', () => {
+    store = new AgentStateStore();
+    runtime = new AgentRuntime(store, [piCrewProvider]);
+
+    runtime.handleHookEvent('pi-crew', {
+      hook_event_name: 'CrewSessionStart',
+      session_id: 'pi-crew:run-1:planner',
+      source: 'run.created',
+      cwd: '/projects/frontend',
+      project_key: 'path:stable-project-key',
+      project_area_labels: ['Frontend', 'Platform'],
+      preferred_area: 'Frontend',
+    });
+    runtime.handleHookEvent('pi-crew', {
+      hook_event_name: 'CrewTaskStart',
+      session_id: 'pi-crew:run-1:planner',
+      tool_id: 'crew-task-1',
+      tool_name: 'CrewTask',
+    });
+
+    expect([...store.values()][0]).toMatchObject({
+      projectKey: 'path:stable-project-key',
+      projectAreaLabels: ['Frontend', 'Platform'],
+      preferredArea: 'Frontend',
+    });
   });
 });

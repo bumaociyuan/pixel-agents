@@ -4,6 +4,7 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { createProjectScope } from '../../core/src/projectScope.js';
+import { readConfig, writeConfig } from '../src/configPersistence.js';
 import type {
   HookDeliveryResult,
   HookOutboxItem,
@@ -133,6 +134,46 @@ describe('PiCrewEventWatcher', () => {
     ).toHaveLength(2);
 
     await watcher.stop();
+  });
+
+  it('adds project identity and every Area label to CrewSessionStart envelopes', async () => {
+    const project = path.join(tempDir, 'frontend');
+    const originalHome = process.env.HOME;
+    process.env.HOME = tempDir;
+    writeRun(project, 'area-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'area-run' },
+    ]);
+    const scope = createProjectScope(project);
+    const config = readConfig();
+    config.projectAreas.mappings[scope.key] = ['Frontend', 'Platform'];
+    writeConfig(config);
+    const captured: Record<string, unknown>[] = [];
+    const watcher = new PiCrewEventWatcher({
+      projectScopes: [scope],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      outboxFactory: () => createCapturingOutbox(captured, () => true),
+      checkpointStore: new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      }),
+    });
+
+    try {
+      watcher.start();
+      await watcher.waitForIdle();
+
+      expect(
+        captured.find((payload) => payload.hook_event_name === 'CrewSessionStart'),
+      ).toMatchObject({
+        project_key: scope.key,
+        project_area_labels: ['Frontend', 'Platform'],
+        preferred_area: 'Frontend',
+      });
+    } finally {
+      await watcher.stop();
+      if (originalHome === undefined) delete process.env.HOME;
+      else process.env.HOME = originalHome;
+    }
   });
 
   it('replaces scopes by draining removed runs and scanning added roots', async () => {

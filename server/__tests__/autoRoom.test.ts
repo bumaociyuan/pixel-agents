@@ -71,9 +71,36 @@ describe('autoRoom: areaMappings key fix', () => {
     });
   });
 
+  it('keeps an existing v2 mapping instead of merging a lower-priority basename mapping', () => {
+    const scope = createProjectScope('/legacy/frontend');
+    const config = readConfig();
+    config.projectAreas.mappings = { [scope.key]: ['V2 Area'] };
+    config.standalone.areaMappings = { frontend: ['Legacy Frontend'] };
+    writeConfig(config);
+
+    expect(migrateProjectAreas([scope]).mappings).toEqual({
+      [scope.key]: ['V2 Area'],
+    });
+  });
+
+  it('short-circuits canonical path before display-name and basename legacy mappings', () => {
+    const scope = createProjectScope('/legacy/frontend', 'Workspace frontend');
+    const config = readConfig();
+    config.standalone.areaMappings = {
+      [scope.path]: ['Canonical Area'],
+      [scope.displayName]: ['Display Area'],
+      frontend: ['Basename Area'],
+    };
+    writeConfig(config);
+
+    expect(migrateProjectAreas([scope]).mappings).toEqual({
+      [scope.key]: ['Canonical Area'],
+    });
+  });
+
   it('copies an ambiguous basename legacy mapping to every matching project with a warning', () => {
-    const first = createProjectScope('/a/frontend');
-    const second = createProjectScope('/b/frontend');
+    const first = createProjectScope('/a/frontend', 'First workspace');
+    const second = createProjectScope('/b/frontend', 'Second workspace');
     const config = readConfig();
     config.vscode.areaMappings = { frontend: ['Frontend Team'] };
     writeConfig(config);

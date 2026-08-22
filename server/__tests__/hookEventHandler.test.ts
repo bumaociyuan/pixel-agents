@@ -926,6 +926,35 @@ describe('HookEventHandler', () => {
 
   // ── preferredArea propagation ─────────────────────────────────
 
+  it('writes pi-crew project identity and every Area label to an existing agent', () => {
+    const piCrewHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      [piCrewProvider],
+      new SessionRouter(),
+    );
+    const agent = createTestAgent({ sessionId: 'pi-crew:run-1:planner' });
+    agents.set(agent.id, agent);
+    piCrewHandler.registerAgent(agent.sessionId, agent.id);
+
+    piCrewHandler.handleEvent('pi-crew', {
+      hook_event_name: 'CrewSessionStart',
+      session_id: agent.sessionId,
+      source: 'run.created',
+      cwd: '/projects/frontend',
+      project_key: 'path:stable-project-key',
+      project_area_labels: ['Frontend', 'Platform'],
+      preferred_area: 'Frontend',
+    });
+
+    expect(agent).toMatchObject({
+      projectKey: 'path:stable-project-key',
+      projectAreaLabels: ['Frontend', 'Platform'],
+      preferredArea: 'Frontend',
+    });
+  });
+
   it('confirmation event passes preferredArea to onExternalSessionDetected', async () => {
     const { piAgentProvider } = await import('../src/providers/hook/pi-agent/piAgent.js');
     const piAgentHandler = new HookEventHandler(

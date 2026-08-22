@@ -46,19 +46,38 @@ export function migrateProjectAreas(scopes: readonly ProjectScope[]): ProjectAre
   const config = readConfig();
   let changed = false;
 
-  for (const namespace of ['standalone', 'vscode'] as const) {
-    for (const [legacyKey, labels] of Object.entries(config[namespace].areaMappings)) {
-      const matches = legacyMappingTargets(legacyKey, scopes);
-      if (matches.length === 0) continue;
-      if (matches.length > 1) {
-        console.warn(
-          `[Pixel Agents] auto-room: ambiguous legacy project-area mapping "${legacyKey}" copied to ${matches.length} projects`,
-        );
-      }
-      for (const scope of matches) {
-        changed = mergeProjectAreaLabels(config.projectAreas, scope.key, labels) || changed;
-      }
+  const selections = scopes.flatMap((scope) => {
+    // An explicit v2 entry is authoritative, even when its label list is empty.
+    if (Object.hasOwn(config.projectAreas.mappings, scope.key)) return [];
+    const selection = selectLegacyProjectAreaLabels(config, scope);
+    return selection ? [{ scope, ...selection }] : [];
+  });
+
+  const warnedBasenames = new Set<string>();
+  for (const selection of selections) {
+    if (selection.priority !== 'basename') continue;
+    if (warnedBasenames.has(selection.legacyKey)) continue;
+    const ambiguousCount = selections.filter(
+      (other) => other.priority === 'basename' && other.legacyKey === selection.legacyKey,
+    ).length;
+    if (ambiguousCount > 1) {
+      warnedBasenames.add(selection.legacyKey);
+      console.warn(
+        `[Pixel Agents] auto-room: ambiguous legacy project-area mapping "${selection.legacyKey}" copied to ${ambiguousCount} projects`,
+      );
     }
+  }
+
+  for (const { scope, labels } of selections) {
+    const nextLabels = uniqueLabels(labels);
+    if (
+      config.projectAreas.mappings[scope.key]?.length === nextLabels.length &&
+      config.projectAreas.mappings[scope.key]?.every((label, index) => label === nextLabels[index])
+    ) {
+      continue;
+    }
+    config.projectAreas.mappings[scope.key] = nextLabels;
+    changed = true;
   }
 
   if (changed) writeConfig(config);
@@ -153,16 +172,31 @@ export function autoCreateRoomForProject(projectDir: string): void {
   }
 }
 
-function legacyMappingTargets(legacyKey: string, scopes: readonly ProjectScope[]): ProjectScope[] {
-  const byKey = scopes.filter((scope) => scope.key === legacyKey);
-  if (byKey.length) return byKey;
-  if (isPathLike(legacyKey)) {
-    const canonical = canonicalizeProjectPath(legacyKey);
-    return scopes.filter((scope) => scope.path === canonical);
+function selectLegacyProjectAreaLabels(
+  config: ReturnType<typeof readConfig>,
+  scope: ProjectScope,
+): {
+  labels: string[];
+  legacyKey: string;
+  priority: 'canonical' | 'displayName' | 'basename';
+} | null {
+  for (const namespace of ['standalone', 'vscode'] as const) {
+    for (const [legacyKey, labels] of Object.entries(config[namespace].areaMappings)) {
+      if (isPathLike(legacyKey) && canonicalizeProjectPath(legacyKey) === scope.path) {
+        return { labels, legacyKey, priority: 'canonical' };
+      }
+    }
   }
-  const byDisplayName = scopes.filter((scope) => scope.displayName === legacyKey);
-  if (byDisplayName.length) return byDisplayName;
-  return scopes.filter((scope) => path.basename(scope.path) === legacyKey);
+  for (const namespace of ['standalone', 'vscode'] as const) {
+    const labels = config[namespace].areaMappings[scope.displayName];
+    if (labels) return { labels, legacyKey: scope.displayName, priority: 'displayName' };
+  }
+  const basename = path.basename(scope.path);
+  for (const namespace of ['standalone', 'vscode'] as const) {
+    const labels = config[namespace].areaMappings[basename];
+    if (labels) return { labels, legacyKey: basename, priority: 'basename' };
+  }
+  return null;
 }
 
 function getLegacyProjectAreaLabels(
@@ -175,23 +209,6 @@ function getLegacyProjectAreaLabels(
     if (legacy[key]) return [...legacy[key]];
   }
   return [];
-}
-
-function mergeProjectAreaLabels(
-  projectAreas: ProjectAreaConfigV2,
-  projectKey: string,
-  labels: readonly string[],
-): boolean {
-  const current = projectAreas.mappings[projectKey] ?? [];
-  const merged = uniqueLabels([...current, ...labels]);
-  if (
-    merged.length === current.length &&
-    merged.every((label, index) => label === current[index])
-  ) {
-    return false;
-  }
-  projectAreas.mappings[projectKey] = merged;
-  return true;
 }
 
 function uniqueLabels(labels: readonly string[]): string[] {

@@ -39,6 +39,8 @@ interface SessionLifecycleCallbacks {
     cwd: string,
     agentName?: string,
     preferredArea?: string,
+    projectKey?: string,
+    projectAreaLabels?: string[],
   ) => void;
   /** Called when /clear is detected via hooks (SessionEnd reason=clear + SessionStart source=clear). */
   onSessionClear?: (
@@ -208,6 +210,7 @@ export class HookEventHandler {
         const agent = this.agents.get(existingAgentId);
         if (agent) {
           agent.hookDelivered = true;
+          this.applyProjectAreaState(agent, normEvent);
         }
         if (debug)
           console.log(
@@ -220,6 +223,7 @@ export class HookEventHandler {
         if (agent.sessionId === event.session_id) {
           this.registerAgent(agent.sessionId, id);
           agent.hookDelivered = true;
+          this.applyProjectAreaState(agent, normEvent);
           if (debug)
             console.log(
               `[Pixel Agents] Hook: Agent ${id} - SessionStart(source=${source}) auto-discovered`,
@@ -242,6 +246,7 @@ export class HookEventHandler {
                 path.resolve(projectDir).toLowerCase();
             if (isMatch) {
               agent.pendingClear = false;
+              this.applyProjectAreaState(agent, normEvent);
               console.log(
                 `[Pixel Agents] Hook: Agent ${id} - /${normEvent.source} detected, reassigning to ${event.session_id}`,
               );
@@ -274,6 +279,8 @@ export class HookEventHandler {
               ? (event as unknown as { agent_name: string }).agent_name
               : undefined,
           preferredArea: normEvent.preferredArea,
+          projectKey: normEvent.projectKey,
+          projectAreaLabels: normEvent.projectAreaLabels,
         });
       } else if (debug && tracked)
         console.log(
@@ -300,13 +307,25 @@ export class HookEventHandler {
         console.log(
           `[Pixel Agents] Hook: ${eventName} confirmed external session ${event.session_id.slice(0, 8)}..., notifying host`,
         );
-      this.lifecycleCallbacks.onExternalSessionDetected?.(
-        pending.sessionId,
-        pending.transcriptPath,
-        pending.cwd,
-        pending.agentName,
-        pending.preferredArea,
-      );
+      if (pending.projectKey !== undefined || pending.projectAreaLabels !== undefined) {
+        this.lifecycleCallbacks.onExternalSessionDetected?.(
+          pending.sessionId,
+          pending.transcriptPath,
+          pending.cwd,
+          pending.agentName,
+          pending.preferredArea,
+          pending.projectKey,
+          pending.projectAreaLabels,
+        );
+      } else {
+        this.lifecycleCallbacks.onExternalSessionDetected?.(
+          pending.sessionId,
+          pending.transcriptPath,
+          pending.cwd,
+          pending.agentName,
+          pending.preferredArea,
+        );
+      }
       // Re-process this event now that the agent exists
       this.handleEvent(providerId, event);
       return;
@@ -393,6 +412,17 @@ export class HookEventHandler {
         // Not yet consumed by the office visualization. Silently drop.
         return;
     }
+  }
+
+  private applyProjectAreaState(
+    agent: AgentState,
+    event: Extract<AgentEvent, { kind: 'sessionStart' }>,
+  ): void {
+    if (event.projectKey !== undefined) agent.projectKey = event.projectKey;
+    if (event.projectAreaLabels !== undefined) {
+      agent.projectAreaLabels = [...event.projectAreaLabels];
+    }
+    if (event.preferredArea !== undefined) agent.preferredArea = event.preferredArea;
   }
 
   /**

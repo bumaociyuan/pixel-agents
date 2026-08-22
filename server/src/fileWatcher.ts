@@ -1072,6 +1072,8 @@ export function adoptExternalSessionFromHook(
 
   persistAgents: () => void,
   onAgentCreated?: (agent: AgentState) => void,
+  projectKey?: string,
+  projectAreaLabels?: string[],
 ): void {
   if (transcriptPath) {
     // File-based provider (Claude, Codex): adopt with JSONL file watching
@@ -1112,6 +1114,11 @@ export function adoptExternalSessionFromHook(
     if (adoptedAgent) {
       adoptedAgent.sessionId = sessionId;
       adoptedAgent.hookDelivered = true;
+      if (projectKey !== undefined) adoptedAgent.projectKey = projectKey;
+      if (projectAreaLabels !== undefined) {
+        adoptedAgent.projectAreaLabels = [...projectAreaLabels];
+      }
+      if (preferredArea !== undefined) adoptedAgent.preferredArea = preferredArea;
       onAgentCreated?.(adoptedAgent);
     }
   } else {
@@ -1147,6 +1154,8 @@ export function adoptExternalSessionFromHook(
       folderName,
       agentName,
       preferredArea,
+      ...(projectKey !== undefined ? { projectKey } : {}),
+      ...(projectAreaLabels !== undefined ? { projectAreaLabels: [...projectAreaLabels] } : {}),
       contextTokens: 0,
       maxContextTokens: DEFAULT_MAX_CONTEXT_TOKENS,
     };

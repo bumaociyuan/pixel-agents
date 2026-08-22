@@ -63,6 +63,10 @@ function normalizeHookEvent(
           source: typeof raw.source === 'string' ? raw.source : undefined,
           cwd: typeof raw.cwd === 'string' ? raw.cwd : undefined,
           preferredArea: typeof raw.preferred_area === 'string' ? raw.preferred_area : undefined,
+          projectKey: typeof raw.project_key === 'string' ? raw.project_key : undefined,
+          projectAreaLabels: Array.isArray(raw.project_area_labels)
+            ? raw.project_area_labels.filter((label): label is string => typeof label === 'string')
+            : undefined,
         },
       };
     case PI_CREW_HOOK_EVENTS.SESSION_END:

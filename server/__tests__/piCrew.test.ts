@@ -190,6 +190,27 @@ describe('piCrewProvider', () => {
       }
     });
 
+    it('normalizes the project Area envelope without changing preferredArea compatibility', () => {
+      const result = piCrewProvider.normalizeHookEvent({
+        hook_event_name: 'CrewSessionStart',
+        session_id: 'crew-sess-1',
+        source: 'task.started',
+        cwd: '/projects/frontend',
+        project_key: 'path:stable-project-key',
+        project_area_labels: ['Frontend', 'Platform'],
+        preferred_area: 'Frontend',
+      });
+
+      expect(result?.event).toEqual({
+        kind: 'sessionStart',
+        source: 'task.started',
+        cwd: '/projects/frontend',
+        projectKey: 'path:stable-project-key',
+        projectAreaLabels: ['Frontend', 'Platform'],
+        preferredArea: 'Frontend',
+      });
+    });
+
     it('omits preferredArea when preferred_area is not a string', () => {
       const result = piCrewProvider.normalizeHookEvent({
         hook_event_name: 'CrewSessionStart',

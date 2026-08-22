@@ -366,9 +366,10 @@ export class PiCrewEventWatcher {
 
     const payloads = piCrewEventToHookPayloads(event, lifecycle);
     for (const payload of payloads) {
-      if (preferredArea && payload.hook_event_name === 'CrewSessionStart') {
-        payload.preferred_area = preferredArea;
-      }
+      if (payload.hook_event_name !== 'CrewSessionStart') continue;
+      payload.project_key = state.projectKey;
+      payload.project_area_labels = [...state.projectAreaLabels];
+      if (preferredArea) payload.preferred_area = preferredArea;
     }
     return payloads;
   }

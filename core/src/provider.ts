@@ -65,6 +65,12 @@ export type AgentEvent =
        *  through the hook event chain to guide the webview's findFreeSeat()
        *  toward an area's chairs. */
       preferredArea?: string;
+      /** Stable identity of the project that emitted this session. Optional so
+       *  providers without project-scoped Areas remain protocol-compatible. */
+      projectKey?: string;
+      /** All configured Area labels for the project. preferredArea remains the
+       *  first-label compatibility field used by existing placement code. */
+      projectAreaLabels?: string[];
     }
   | { kind: 'sessionEnd'; reason?: string };
 

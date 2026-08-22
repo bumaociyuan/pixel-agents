@@ -12,6 +12,10 @@ export interface PendingExternalSession {
    *  the hook event chain to guide the webview's findFreeSeat() toward an area's
    *  chairs. */
   preferredArea?: string;
+  /** Stable project identity supplied by project-scoped providers (e.g. pi-crew). */
+  projectKey?: string;
+  /** Full project Area mapping supplied by project-scoped providers. */
+  projectAreaLabels?: string[];
 }
 
 /** An event waiting to be dispatched once its agent registers. */
