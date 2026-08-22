@@ -66,6 +66,61 @@ describe('HookOutbox', () => {
     }
   });
 
+  it('waits for the earlier HTTP response body to end before sending the next payload', async () => {
+    const received: string[] = [];
+    const firstHeadersSent = deferred<void>();
+    const endFirstBody = deferred<void>();
+    const server = http.createServer((request, response) => {
+      const chunks: Buffer[] = [];
+      request.on('data', (chunk: Buffer) => chunks.push(chunk));
+      request.on('end', () => {
+        const payload = JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<
+          string,
+          unknown
+        >;
+        received.push(String(payload.hook_event_name));
+        if (received.length === 1) {
+          response.writeHead(200, { 'Content-Length': '1' });
+          response.flushHeaders();
+          firstHeadersSent.resolve();
+          void endFirstBody.promise.then(() => response.end('x'));
+          return;
+        }
+        response.writeHead(204).end();
+      });
+    });
+    const serverUrl = await listen(server);
+    const outbox = new HookOutbox({
+      serverUrl,
+      authToken: 'test-token',
+      requestTimeoutMs: 1_000,
+      maxAttempts: 1,
+      backoffMs: () => 0,
+    });
+
+    try {
+      const delivery = outbox.enqueue({
+        eventId: 'body-source',
+        payloads: [
+          envelope('body-source', 0, 'CrewSessionStart'),
+          envelope('body-source', 1, 'CrewTaskStart'),
+        ],
+      });
+
+      await firstHeadersSent.promise;
+      await nextTick();
+      expect(received).toEqual(['CrewSessionStart']);
+
+      endFirstBody.resolve();
+
+      await expect(delivery).resolves.toMatchObject({ outcome: 'success', attempts: 2 });
+      expect(received).toEqual(['CrewSessionStart', 'CrewTaskStart']);
+    } finally {
+      outbox.dispose();
+      await close(server);
+    }
+  });
+
   it('does not send a later payload until the preceding payload has completed', async () => {
     const received: string[] = [];
     const firstRequest = deferred<void>();
@@ -248,4 +303,8 @@ async function close(server: http.Server): Promise<void> {
   await new Promise<void>((resolve, reject) =>
     server.close((error) => (error ? reject(error) : resolve())),
   );
+}
+
+async function nextTick(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
 }

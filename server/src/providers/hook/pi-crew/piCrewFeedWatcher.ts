@@ -42,6 +42,8 @@ export interface EventWatcherOptions {
   checkpointStore?: PiCrewCheckpointStore;
   /** Creates an independent, ordered queue for each discovered pi-crew run. */
   outboxFactory?: (runId: string) => HookOutboxLike;
+  /** Test seam for pausing immediately before an event is added to its run outbox. */
+  beforeOutboxEnqueue?: () => Promise<void>;
   /** Observable diagnostics for checkpoint corruption, reader recovery, and uncertain history. */
   onDiagnostic?: (message: string) => void;
 }
@@ -56,14 +58,19 @@ interface WatchedRunState {
   lifecycle: RunLifecycleState;
   outbox: HookOutboxLike;
   processing: boolean;
+  enqueueSafe: boolean;
   pendingTerminalOffset?: number;
 }
 
 export class PiCrewEventWatcher {
   private interval: ReturnType<typeof setInterval> | null = null;
+  private stopping = false;
+  private stopPromise: Promise<void> | undefined;
   /** eventsPath → independent reader and lifecycle state. */
   private runStates = new Map<string, WatchedRunState>();
   private readonly processingTasks = new Set<Promise<void>>();
+  private readonly unsafeEnqueueStates = new Set<WatchedRunState>();
+  private readonly safePointWaiters = new Set<() => void>();
   /** Known project directories (for new-project detection). */
   private knownProjects = new Set<string>();
   private readonly checkpointStore: PiCrewCheckpointStore;
@@ -78,7 +85,7 @@ export class PiCrewEventWatcher {
 
   /** Start polling pi-crew event logs. */
   start(): void {
-    if (this.interval) return;
+    if (this.interval || this.stopping) return;
     console.log(
       `[Pixel Agents] pi-crew: starting event watcher for ${this.opts.projectDirs.length} project(s)`,
     );
@@ -88,19 +95,16 @@ export class PiCrewEventWatcher {
   }
 
   /** Stop the poll loop. */
-  async stop(): Promise<void> {
+  stop(): Promise<void> {
+    if (this.stopPromise) return this.stopPromise;
+    this.stopping = true;
     if (this.interval) {
       clearInterval(this.interval);
       this.interval = null;
       console.log('[Pixel Agents] pi-crew: event watcher stopped');
     }
-    await Promise.all(
-      [...this.runStates.values()].map(async (state) => {
-        const drained = await state.outbox.drain(PI_CREW_HOOK_DRAIN_TIMEOUT_MS);
-        if (!drained) this.onDiagnostic(`hook outbox did not drain for ${state.eventsPath}`);
-      }),
-    );
-    await this.waitForIdle();
+    this.stopPromise = this.finishStopping();
+    return this.stopPromise;
   }
 
   isRunning(): boolean {
@@ -123,6 +127,7 @@ export class PiCrewEventWatcher {
   // ── Polling ──────────────────────────────────────────────
 
   private poll(): void {
+    if (this.stopping) return;
     for (const dir of this.opts.projectDirs) {
       this.scanRunsDir(dir);
     }
@@ -130,8 +135,6 @@ export class PiCrewEventWatcher {
     for (const [eventsPath, state] of this.runStates) {
       this.processRun(eventsPath, state);
     }
-    // Clean up completed runs that have been stale for a while
-    this.pruneCompletedRuns();
   }
 
   /** Discover runs by scanning .crew/state/runs/. */
@@ -196,6 +199,7 @@ export class PiCrewEventWatcher {
             lifecycle: createRunLifecycle(project, runId, cwd),
             outbox: this.createOutbox(runId),
             processing: false,
+            enqueueSafe: true,
             pendingTerminalOffset: lastRecord.endOffset,
           };
         } else if (lastRecord && isTerminalRunEvent(lastRecord.value)) {
@@ -213,6 +217,7 @@ export class PiCrewEventWatcher {
         lifecycle: createRunLifecycle(project, runId, cwd),
         outbox: this.createOutbox(runId),
         processing: false,
+        enqueueSafe: true,
       };
       this.runStates.set(eventsPath, state);
 
@@ -236,12 +241,13 @@ export class PiCrewEventWatcher {
   // ── Event reading ────────────────────────────────────────
 
   private processRun(eventsPath: string, state: WatchedRunState): void {
-    if (state.processing) return;
+    if (this.stopping || state.processing) return;
     state.processing = true;
     const task = this.readEvents(eventsPath, state)
       .catch((error) => this.onDiagnostic(`cannot process ${eventsPath}: ${errorMessage(error)}`))
       .finally(() => {
         state.processing = false;
+        this.pruneCompletedRuns();
       });
     this.processingTasks.add(task);
     void task.finally(() => this.processingTasks.delete(task));
@@ -268,6 +274,7 @@ export class PiCrewEventWatcher {
     }
 
     for (const record of state.reader.readAvailable()) {
+      if (this.stopping) break;
       const eventId = sourceEventId(record.value);
       if (state.reader.hasRecentEventId(eventId)) {
         const nextLifecycle = cloneLifecycle(state.lifecycle);
@@ -284,16 +291,23 @@ export class PiCrewEventWatcher {
       const payloads = this.dispatchEvent(record.value, state, nextLifecycle);
       let result: HookDeliveryResult;
       try {
-        result = await state.outbox.enqueue({
+        this.markEnqueueUnsafe(state);
+        if (this.opts.beforeOutboxEnqueue) await this.opts.beforeOutboxEnqueue();
+        if (this.stopping) break;
+        const delivery = state.outbox.enqueue({
           eventId,
           payloads: payloads.map((body, index) => ({
             idempotencyKey: `${eventId}:${index}`,
             body,
           })),
         });
+        this.markEnqueueSafe(state);
+        result = await delivery;
       } catch (error) {
         this.onDiagnostic(`cannot enqueue hook event ${eventId}: ${errorMessage(error)}`);
         break;
+      } finally {
+        this.markEnqueueSafe(state);
       }
       if (result.outcome === 'retryable_failure') break;
 
@@ -331,6 +345,7 @@ export class PiCrewEventWatcher {
     const STALE_MS = 5 * 60 * 1000; // 5 minutes
 
     for (const [eventsPath, state] of this.runStates) {
+      if (state.processing) continue;
       try {
         const stat = fs.statSync(eventsPath);
         if (now - stat.mtimeMs < STALE_MS) continue;
@@ -377,6 +392,37 @@ export class PiCrewEventWatcher {
       authToken: this.opts.authToken,
       onDiagnostic: this.onDiagnostic,
     });
+  }
+
+  private async finishStopping(): Promise<void> {
+    await this.waitForEnqueueSafePoints();
+    await Promise.all(
+      [...this.runStates.values()].map(async (state) => {
+        const drained = await state.outbox.drain(PI_CREW_HOOK_DRAIN_TIMEOUT_MS);
+        if (!drained) this.onDiagnostic(`hook outbox did not drain for ${state.eventsPath}`);
+      }),
+    );
+    await this.waitForIdle();
+  }
+
+  private markEnqueueUnsafe(state: WatchedRunState): void {
+    state.enqueueSafe = false;
+    this.unsafeEnqueueStates.add(state);
+  }
+
+  private markEnqueueSafe(state: WatchedRunState): void {
+    if (state.enqueueSafe) return;
+    state.enqueueSafe = true;
+    this.unsafeEnqueueStates.delete(state);
+    if (this.unsafeEnqueueStates.size !== 0) return;
+    for (const resolve of this.safePointWaiters) resolve();
+    this.safePointWaiters.clear();
+  }
+
+  private async waitForEnqueueSafePoints(): Promise<void> {
+    while (this.unsafeEnqueueStates.size > 0) {
+      await new Promise<void>((resolve) => this.safePointWaiters.add(resolve));
+    }
   }
 }
 

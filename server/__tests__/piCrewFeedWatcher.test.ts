@@ -109,7 +109,7 @@ describe('PiCrewEventWatcher', () => {
     watcher.stop();
   });
 
-  it('prunes a stale cancelled run', () => {
+  it('prunes a stale cancelled run', async () => {
     const watcher = new PiCrewEventWatcher({
       projectDirs: [tempDir],
       serverUrl: 'http://127.0.0.1:1234',
@@ -133,10 +133,11 @@ describe('PiCrewEventWatcher', () => {
     fs.utimesSync(eventsPath, stale, stale);
 
     watcher.start();
+    await watcher.waitForIdle();
 
     const states = (watcher as unknown as { runStates: Map<string, unknown> }).runStates;
     expect(states).toHaveLength(0);
-    watcher.stop();
+    await watcher.stop();
   });
 
   it('forwards a run mismatch diagnostic to hook normalization', () => {
@@ -357,6 +358,118 @@ describe('PiCrewEventWatcher', () => {
       ),
     ).toBe(true);
     await watcher.stop();
+  });
+
+  it('reaches an enqueue safe point before stopping and draining run outboxes', async () => {
+    writeRun(tempDir, 'stop-safe-point', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'stop-safe-point' },
+    ]);
+    const enteredBeforeEnqueue = deferred<void>();
+    const releaseEnqueue = deferred<void>();
+    let drainCalls = 0;
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      checkpointStore: new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      }),
+      beforeOutboxEnqueue: async () => {
+        enteredBeforeEnqueue.resolve();
+        await releaseEnqueue.promise;
+      },
+      outboxFactory: () => ({
+        enqueue: async () => ({ outcome: 'success', attempts: 1, permanentFailures: 0 }),
+        drain: async () => {
+          drainCalls += 1;
+          return true;
+        },
+      }),
+    });
+
+    try {
+      watcher.start();
+      expect(await waitUntil(() => enteredBeforeEnqueue.settled)).toBe(true);
+
+      const stopping = watcher.stop();
+      await nextTick();
+      expect(drainCalls).toBe(0);
+
+      releaseEnqueue.resolve();
+      await stopping;
+      expect(drainCalls).toBe(1);
+    } finally {
+      releaseEnqueue.resolve();
+      await watcher.stop();
+    }
+  });
+
+  it('retains a processing terminal run so stop can drain its outbox', async () => {
+    const { eventsPath } = writeRun(tempDir, 'prune-processing-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'prune-processing-run' },
+    ]);
+    const terminalEnqueued = deferred<void>();
+    const terminalDelivery = deferred<HookDeliveryResult>();
+    let enqueueCalls = 0;
+    let drainCalls = 0;
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      checkpointStore: new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      }),
+      outboxFactory: () => ({
+        enqueue: (item: HookOutboxItem) => {
+          enqueueCalls += 1;
+          if (enqueueCalls === 1) {
+            return Promise.resolve({
+              outcome: 'success' as const,
+              attempts: item.payloads.length,
+              permanentFailures: 0,
+            });
+          }
+          terminalEnqueued.resolve();
+          return terminalDelivery.promise;
+        },
+        drain: async () => {
+          drainCalls += 1;
+          terminalDelivery.resolve({
+            outcome: 'retryable_failure',
+            attempts: 1,
+            permanentFailures: 0,
+          });
+          return false;
+        },
+      }),
+    });
+
+    watcher.start();
+    await watcher.waitForIdle();
+    fs.appendFileSync(
+      eventsPath,
+      `${JSON.stringify({
+        time: '2026-08-22T00:00:01.000Z',
+        type: 'run.completed',
+        runId: 'prune-processing-run',
+      })}\n`,
+    );
+    const stale = new Date(Date.now() - 6 * 60 * 1000);
+    fs.utimesSync(eventsPath, stale, stale);
+
+    try {
+      (watcher as unknown as { poll: () => void }).poll();
+      await terminalEnqueued.promise;
+
+      const states = (watcher as unknown as { runStates: Map<string, unknown> }).runStates;
+      expect(states.has(eventsPath)).toBe(true);
+
+      await watcher.stop();
+      expect(drainCalls).toBe(1);
+    } finally {
+      terminalDelivery.resolve({ outcome: 'retryable_failure', attempts: 1, permanentFailures: 0 });
+      await watcher.stop();
+    }
   });
 
   it('does not cross an unconfirmed record to commit a later confirmed record', () => {
@@ -695,7 +808,24 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 250): Promise<boo
   return predicate();
 }
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+async function nextTick(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void; settled: boolean } {
   let resolve!: (value: T) => void;
-  return { promise: new Promise<T>((done) => (resolve = done)), resolve };
+  let settled = false;
+  return {
+    promise: new Promise<T>(
+      (done) =>
+        (resolve = (value) => {
+          settled = true;
+          done(value);
+        }),
+    ),
+    resolve,
+    get settled() {
+      return settled;
+    },
+  };
 }

@@ -61,6 +61,7 @@ export class HookOutbox implements HookOutboxLike {
   private disposed = false;
   private tail: Promise<void> = Promise.resolve();
   private readonly activeRequests = new Set<http.ClientRequest>();
+  private readonly activeResponses = new Set<http.IncomingMessage>();
   private readonly activeControllers = new Set<AbortController>();
   private readonly delays = new Map<ReturnType<typeof setTimeout>, () => void>();
   private readonly requestTimeoutMs: number;
@@ -106,6 +107,9 @@ export class HookOutbox implements HookOutboxLike {
     this.delays.clear();
     for (const request of this.activeRequests) request.destroy(new Error('Hook outbox is stopped'));
     this.activeRequests.clear();
+    for (const response of this.activeResponses)
+      response.destroy(new Error('Hook outbox is stopped'));
+    this.activeResponses.clear();
     for (const controller of this.activeControllers) controller.abort();
     this.activeControllers.clear();
   }
@@ -177,11 +181,13 @@ export class HookOutbox implements HookOutboxLike {
       let settled = false;
       let timedOut = false;
       let timeout: ReturnType<typeof setTimeout> | undefined;
+      let response: http.IncomingMessage | undefined;
       const finish = (result: AttemptResult): void => {
         if (settled) return;
         settled = true;
         if (timeout) clearTimeout(timeout);
         this.activeRequests.delete(request);
+        if (response) this.activeResponses.delete(response);
         resolve(result);
       };
       const request = transport.request(
@@ -197,9 +203,20 @@ export class HookOutbox implements HookOutboxLike {
             'X-Pixel-Agents-Idempotency-Key': payload.idempotencyKey,
           },
         },
-        (response) => {
-          response.resume();
-          finish({ kind: 'response', statusCode: response.statusCode ?? 0 });
+        (incoming) => {
+          response = incoming;
+          this.activeResponses.add(incoming);
+          const completedResponse = (): void =>
+            finish({ kind: 'response', statusCode: incoming.statusCode ?? 0 });
+          const interruptedResponse = (error: Error): void => finish({ kind: 'network', error });
+          incoming.once('end', completedResponse);
+          incoming.once('aborted', () => interruptedResponse(new Error('Hook response aborted')));
+          incoming.once('error', interruptedResponse);
+          incoming.once('close', () => {
+            if (incoming.complete) completedResponse();
+            else interruptedResponse(new Error('Hook response closed before completion'));
+          });
+          incoming.resume();
         },
       );
 
