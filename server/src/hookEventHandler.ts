@@ -181,6 +181,13 @@ export class HookEventHandler {
       }
     }
 
+    // Diagnostics must be visible even when the affected run has not yet created
+    // or registered its planner session.
+    if (normEvent.kind === 'diagnostic') {
+      console.warn(`[Pixel Agents] Hook diagnostic (${normEvent.code})`, normEvent.data);
+      return;
+    }
+
     // --- SessionStart: handle /clear for known agents, ignore unknown sessions ---
     // External session detection via SessionStart is deferred to Phase C.
     // For now, only use SessionStart for:
@@ -384,9 +391,6 @@ export class HookEventHandler {
         return this.handleTeammateIdle(event, agent, agentId);
       case 'progress':
         // Not yet consumed by the office visualization. Silently drop.
-        return;
-      case 'diagnostic':
-        console.warn(`[Pixel Agents] Hook diagnostic (${normEvent.code})`, normEvent.data);
         return;
     }
   }

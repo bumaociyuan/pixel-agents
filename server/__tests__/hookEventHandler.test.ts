@@ -106,6 +106,32 @@ describe('HookEventHandler', () => {
     }
   });
 
+  it('warns for a pi-crew diagnostic before its planner session is registered', () => {
+    const piCrewHandler = new HookEventHandler(
+      agents,
+      waitingTimers,
+      permissionTimers,
+      [piCrewProvider],
+      new SessionRouter(),
+    );
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      piCrewHandler.handleEvent('pi-crew', {
+        hook_event_name: 'CrewDiagnostic',
+        session_id: 'unregistered-planner-session',
+        diagnostic_code: 'run_id_mismatch',
+        data: { eventRunId: 'other-run', stateRunId: 'run-1' },
+      });
+
+      expect(warn).toHaveBeenCalledWith('[Pixel Agents] Hook diagnostic (run_id_mismatch)', {
+        eventRunId: 'other-run',
+        stateRunId: 'run-1',
+      });
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   // ── PermissionRequest ───────────────────────────────────────
 
   it('PermissionRequest sends agentToolPermission', () => {
