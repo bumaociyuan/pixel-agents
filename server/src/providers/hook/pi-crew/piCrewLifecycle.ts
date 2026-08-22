@@ -32,6 +32,7 @@ export interface RunLifecycleState {
   cwd: string;
   agents: Map<string, AgentLifecycleState>;
   tasks: Map<string, TaskLifecycleState>;
+  seenProgressFingerprints: Set<string>;
   planner?: { agentKey: string; toolId: string; active: boolean };
   terminal: boolean;
 }
@@ -47,6 +48,7 @@ export function createRunLifecycle(
     cwd,
     agents: new Map(),
     tasks: new Map(),
+    seenProgressFingerprints: new Set(),
     terminal: false,
   };
 }
@@ -56,9 +58,16 @@ export function applyPiCrewEvent(state: RunLifecycleState, event: PiCrewEvent): 
     return [
       {
         hook_event_name: 'CrewDiagnostic',
+        session_id: agentSessionId(state, 'planner'),
+        agent_name: 'planner',
         reason: 'run_id_mismatch',
         event_run_id: event.runId,
         state_run_id: state.runId,
+        data: {
+          reason: 'run_id_mismatch',
+          eventRunId: event.runId,
+          stateRunId: state.runId,
+        },
       },
     ];
   }
@@ -159,6 +168,9 @@ function startTask(state: RunLifecycleState, event: PiCrewEvent): HookPayload[] 
       ),
     );
   }
+  if (task?.prepared && task.agentKey !== agent.key) {
+    payloads.push(...discardPreparedTask(state, task, 'task.reassigned'));
+  }
   payloads.push(
     ...introduceAgent(agent, {
       source: 'task.started',
@@ -226,6 +238,9 @@ function reportProgress(state: RunLifecycleState, event: PiCrewEvent): HookPaylo
 
   const agent = state.agents.get(task.agentKey);
   if (!agent) return [];
+  const fingerprint = progressFingerprint(event, task);
+  if (state.seenProgressFingerprints.has(fingerprint)) return [];
+  state.seenProgressFingerprints.add(fingerprint);
   const payloads: HookPayload[] = [];
   if (task.blocked) {
     task.blocked = false;
@@ -408,13 +423,17 @@ function getAgent(state: RunLifecycleState, name: string): AgentLifecycleState {
   const agent: AgentLifecycleState = {
     key,
     name,
-    sessionId: `pi-crew:${state.project.key}:${sanitizeKey(state.runId)}:${key}`,
+    sessionId: agentSessionId(state, name),
     activeTaskIds: new Set(),
     introduced: false,
     sessionOpen: false,
   };
   state.agents.set(key, agent);
   return agent;
+}
+
+function agentSessionId(state: RunLifecycleState, name: string): string {
+  return `pi-crew:${state.project.key}:${sanitizeKey(state.runId)}:${sanitizeKey(name)}`;
 }
 
 function hasLiveTasksForAgent(state: RunLifecycleState, agentKey: string): boolean {
@@ -462,6 +481,36 @@ function explicitWorkerName(event: PiCrewEvent): string | undefined {
 
 function workerFallbackName(event: PiCrewEvent): string {
   return `${stringValue(event.data?.role) || 'worker'}:${event.taskId || 'unknown'}`;
+}
+
+function progressFingerprint(event: PiCrewEvent, task: TaskLifecycleState): string {
+  if (typeof event.metadata?.fingerprint === 'string') {
+    return `fingerprint:${event.metadata.fingerprint}`;
+  }
+  if (typeof event.metadata?.seq === 'number') {
+    return `seq:${event.runId}:${event.metadata.seq}`;
+  }
+  return `payload:${stableSerialize({
+    time: event.time,
+    type: event.type,
+    runId: event.runId,
+    taskId: task.id,
+    attemptId: task.attemptId,
+    message: event.message,
+    data: event.data,
+  })}`;
+}
+
+function stableSerialize(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (value && typeof value === 'object') {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'undefined';
 }
 
 function roleToToolName(role: string): string {

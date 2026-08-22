@@ -96,6 +96,8 @@ function normalizeHookEvent(
       };
     case PI_CREW_HOOK_EVENTS.PROGRESS:
       return { sessionId, event: { kind: 'progress', toolId: 'current', data: raw.data } };
+    case 'CrewDiagnostic':
+      return { sessionId, event: { kind: 'progress', toolId: 'current', data: raw.data } };
     default:
       return null;
   }

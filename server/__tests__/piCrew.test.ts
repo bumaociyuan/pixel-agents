@@ -23,6 +23,32 @@ describe('piCrewProvider', () => {
     ]);
   });
 
+  it('keeps a run mismatch diagnostic visible through hook normalization', () => {
+    const state = createRunLifecycle(createProjectScope('/a/app'), 'run-1', '/a/app');
+    const [payload] = piCrewEventToHookPayloads(
+      {
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'task.started',
+        runId: 'other-run',
+        taskId: 't1',
+      },
+      state,
+    );
+
+    const normalized = piCrewProvider.normalizeHookEvent(payload);
+
+    expect(normalized?.sessionId).toContain('planner');
+    expect(normalized?.event).toEqual({
+      kind: 'progress',
+      toolId: 'current',
+      data: {
+        eventRunId: 'other-run',
+        reason: 'run_id_mismatch',
+        stateRunId: 'run-1',
+      },
+    });
+  });
+
   describe('identity', () => {
     it('has kind "hook"', () => {
       expect(piCrewProvider.kind).toBe('hook');

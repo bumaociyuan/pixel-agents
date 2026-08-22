@@ -54,6 +54,7 @@ function lifecycleEvent(
   runId: string;
   taskId?: string;
   data?: Record<string, unknown>;
+  metadata?: { seq?: number; fingerprint?: string };
 } {
   return {
     time: '2026-08-22T00:00:00.000Z',
@@ -310,13 +311,58 @@ describe('pi-crew lifecycle', () => {
     otherRunEvent.runId = 'other-run';
 
     expect(applyPiCrewEvent(state, otherRunEvent)).toEqual([
-      {
+      expect.objectContaining({
         hook_event_name: 'CrewDiagnostic',
         reason: 'run_id_mismatch',
         event_run_id: 'other-run',
         state_run_id: 'run-1',
-      },
+      }),
     ]);
     expect(state.agents).toHaveLength(0);
+  });
+
+  it('releases the prepared owner before reassigning the task start', () => {
+    const state = run();
+    applyPiCrewEvent(
+      state,
+      lifecycleEvent('task.parallel_start', undefined, {
+        taskIds: ['t1'],
+        roles: ['worker'],
+        agents: ['A'],
+      }),
+    );
+
+    const reassigned = applyPiCrewEvent(state, taskStarted('t1', 'B'));
+    const terminal = applyPiCrewEvent(state, lifecycleEvent('run.completed'));
+
+    expect(reassigned.map(eventName)).toEqual([
+      'CrewSessionEnd',
+      'CrewSessionStart',
+      'CrewTaskStart',
+    ]);
+    expect(reassigned[0].agent_name).toBe('A');
+    expect(terminal.map(eventName)).toEqual(['CrewTaskDone', 'CrewSessionEnd']);
+    expect(terminal[1].agent_name).toBe('B');
+  });
+
+  it('suppresses a replayed progress row without an event id', () => {
+    const state = run();
+    applyPiCrewEvent(state, taskStarted('t1', 'A'));
+    const progress = lifecycleEvent('task.progress', 't1', { turns: 1, tokens: 2 });
+
+    expect(applyPiCrewEvent(state, progress).map(eventName)).toEqual(['CrewProgress']);
+    expect(applyPiCrewEvent(state, progress)).toEqual([]);
+  });
+
+  it('keeps equal progress payloads with distinct feed sequence ids', () => {
+    const state = run();
+    applyPiCrewEvent(state, taskStarted('t1', 'A'));
+    const first = lifecycleEvent('task.progress', 't1', { turns: 1 });
+    first.metadata = { seq: 10 };
+    const second = lifecycleEvent('task.progress', 't1', { turns: 1 });
+    second.metadata = { seq: 11 };
+
+    expect(applyPiCrewEvent(state, first).map(eventName)).toEqual(['CrewProgress']);
+    expect(applyPiCrewEvent(state, second).map(eventName)).toEqual(['CrewProgress']);
   });
 });

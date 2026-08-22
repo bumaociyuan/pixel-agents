@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
+import { piCrewProvider } from '../src/providers/hook/pi-crew/piCrew.js';
 import { PiCrewEventWatcher } from '../src/providers/hook/pi-crew/piCrewFeedWatcher.js';
 
 describe('PiCrewEventWatcher', () => {
@@ -125,6 +126,34 @@ describe('PiCrewEventWatcher', () => {
 
     const states = (watcher as unknown as { runStates: Map<string, unknown> }).runStates;
     expect(states).toHaveLength(0);
+    watcher.stop();
+  });
+
+  it('forwards a run mismatch diagnostic to hook normalization', () => {
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+    });
+    const captured: Record<string, unknown>[] = [];
+    (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook =
+      (payload) => captured.push(payload);
+    const runDir = path.join(tempDir, '.crew', 'state', 'runs', 'run-001');
+    fs.mkdirSync(runDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(runDir, 'events.jsonl'),
+      `${JSON.stringify({
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'task.started',
+        runId: 'other-run',
+        taskId: 't1',
+      })}\n`,
+    );
+
+    watcher.start();
+
+    expect(captured[0].hook_event_name).toBe('CrewDiagnostic');
+    expect(piCrewProvider.normalizeHookEvent(captured[0])?.event.kind).toBe('progress');
     watcher.stop();
   });
 });
