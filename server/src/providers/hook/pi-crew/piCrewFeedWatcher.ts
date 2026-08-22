@@ -120,8 +120,8 @@ export class PiCrewEventWatcher {
     for (const [eventsPath, state] of this.runStates) {
       try {
         this.readEvents(eventsPath, state);
-      } catch {
-        // Event log may be temporarily unreadable
+      } catch (error) {
+        this.onDiagnostic(`cannot process ${eventsPath}: ${errorMessage(error)}`);
       }
     }
     // Clean up completed runs that have been stale for a while
@@ -221,8 +221,13 @@ export class PiCrewEventWatcher {
     for (const record of state.reader.readAvailable()) {
       const eventId = sourceEventId(record.value);
       if (state.reader.hasRecentEventId(eventId)) {
-        state.reader.commit(record.endOffset);
-        this.checkpointStore.save(state.projectKey, state.runId, state.reader.snapshot());
+        const nextLifecycle = cloneLifecycle(state.lifecycle);
+        piCrewEventToHookPayloads(record.value, nextLifecycle);
+        const checkpoint = state.reader.prepareCommit(record.endOffset);
+        if (!checkpoint) break;
+        this.checkpointStore.save(state.projectKey, state.runId, checkpoint);
+        state.reader.finalizeCommit(checkpoint);
+        state.lifecycle = nextLifecycle;
         continue;
       }
 
@@ -230,9 +235,10 @@ export class PiCrewEventWatcher {
       const payloads = this.dispatchEvent(record.value, state, nextLifecycle);
       if (this.opts.onEventDeliveryConfirmed?.(record.value, payloads) !== true) break;
 
-      state.reader.rememberEventId(eventId);
-      state.reader.commit(record.endOffset);
-      this.checkpointStore.save(state.projectKey, state.runId, state.reader.snapshot());
+      const checkpoint = state.reader.prepareCommit(record.endOffset, eventId);
+      if (!checkpoint) break;
+      this.checkpointStore.save(state.projectKey, state.runId, checkpoint);
+      state.reader.finalizeCommit(checkpoint);
       state.lifecycle = nextLifecycle;
     }
   }
@@ -358,9 +364,13 @@ function cloneLifecycle(state: RunLifecycleState): RunLifecycleState {
 }
 
 function sourceEventId(event: PiCrewEvent): string {
-  if (event.metadata?.fingerprint) return event.metadata.fingerprint;
-  if (Number.isInteger(event.metadata?.seq)) return `${event.runId}:${event.metadata?.seq}`;
+  if (event.metadata?.fingerprint) return `fingerprint:${event.metadata.fingerprint}`;
+  if (Number.isInteger(event.metadata?.seq)) return `seq:${event.runId}:${event.metadata?.seq}`;
   return `hash:${createHash('sha256').update(stableJson(event)).digest('base64url')}`;
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function stableJson(value: unknown): string {

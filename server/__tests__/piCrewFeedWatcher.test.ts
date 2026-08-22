@@ -365,9 +365,126 @@ describe('PiCrewEventWatcher', () => {
     (watcher as unknown as { poll: () => void }).poll();
 
     expect(store.load(createProjectScope(tempDir).key, 'dedupe-run')?.recentEventIds).toEqual([
-      'same-source',
+      'fingerprint:same-source',
     ]);
     expect(captured).toHaveLength(2);
+    watcher.stop();
+  });
+
+  it('rolls back reader and lifecycle when checkpoint save fails, then replays with a diagnostic', () => {
+    const { eventsPath } = writeRun(tempDir, 'save-failure-run', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'save-failure-run' },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const originalSave = store.save.bind(store);
+    let failSave = true;
+    (store as unknown as { save: typeof store.save }).save = (...args) => {
+      if (failSave) throw new Error('checkpoint disk full');
+      originalSave(...args);
+    };
+    const diagnostics: string[] = [];
+    const captured: Record<string, unknown>[] = [];
+    const watcher = new PiCrewEventWatcher({
+      projectDirs: [tempDir],
+      serverUrl: 'http://127.0.0.1:1234',
+      authToken: 'test-token',
+      checkpointStore: store,
+      onEventDeliveryConfirmed: () => true,
+      onDiagnostic: (message) => diagnostics.push(message),
+    });
+    (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook =
+      (payload) => captured.push(payload);
+
+    watcher.start();
+    failSave = false;
+    (watcher as unknown as { poll: () => void }).poll();
+
+    expect(captured.map((payload) => payload.hook_event_name)).toEqual([
+      'CrewSessionStart',
+      'CrewPlanStart',
+      'CrewSessionStart',
+      'CrewPlanStart',
+    ]);
+    expect(store.load(createProjectScope(tempDir).key, 'save-failure-run')?.committedOffset).toBe(
+      fs.statSync(eventsPath).size,
+    );
+    expect(diagnostics.join('\n')).toContain('checkpoint disk full');
+    watcher.stop();
+  });
+
+  it('silently reapplies a rotated planner before a new terminal event', () => {
+    const { eventsPath } = writeRun(tempDir, 'silent-rotation', [
+      {
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'run.created',
+        runId: 'silent-rotation',
+        metadata: { fingerprint: 'planner-event' },
+      },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const captured: Record<string, unknown>[] = [];
+    const watcher = createCapturingWatcher(tempDir, captured, store, () => true);
+    watcher.start();
+    fs.renameSync(eventsPath, `${eventsPath}.old`);
+    fs.writeFileSync(
+      eventsPath,
+      `${[
+        {
+          time: '2026-08-22T00:00:00.000Z',
+          type: 'run.created',
+          runId: 'silent-rotation',
+          metadata: { fingerprint: 'planner-event' },
+        },
+        {
+          time: '2026-08-22T00:00:01.000Z',
+          type: 'run.completed',
+          runId: 'silent-rotation',
+          metadata: { fingerprint: 'new-terminal' },
+        },
+      ]
+        .map((event) => JSON.stringify(event))
+        .join('\n')}\n`,
+    );
+
+    (watcher as unknown as { poll: () => void }).poll();
+
+    expect(captured.slice(-2).map((payload) => payload.hook_event_name)).toEqual([
+      'CrewPlanDone',
+      'CrewSessionEnd',
+    ]);
+    watcher.stop();
+  });
+
+  it('namespaces fingerprint, sequence, and content-hash checkpoint IDs', () => {
+    writeRun(tempDir, 'id-namespace-run', [
+      {
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'run.created',
+        runId: 'id-namespace-run',
+        metadata: { fingerprint: 'id-namespace-run:1' },
+      },
+      {
+        time: '2026-08-22T00:00:01.000Z',
+        type: 'task.started',
+        runId: 'id-namespace-run',
+        taskId: 't1',
+        metadata: { seq: 1 },
+      },
+      {
+        time: '2026-08-22T00:00:02.000Z',
+        type: 'task.progress',
+        runId: 'id-namespace-run',
+        taskId: 't1',
+      },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const watcher = createCapturingWatcher(tempDir, [], store, () => true);
+
+    watcher.start();
+
+    expect(store.load(createProjectScope(tempDir).key, 'id-namespace-run')?.recentEventIds).toEqual(
+      ['fingerprint:id-namespace-run:1', 'seq:id-namespace-run:1', expect.stringMatching(/^hash:/)],
+    );
     watcher.stop();
   });
 

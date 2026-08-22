@@ -2,7 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { JsonlCheckpoint } from '../src/providers/hook/pi-crew/jsonlReader.js';
 import { PiCrewCheckpointStore } from '../src/providers/hook/pi-crew/piCrewCheckpointStore.js';
@@ -17,6 +17,7 @@ describe('PiCrewCheckpointStore', () => {
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     fs.rmSync(tempDir, { recursive: true, force: true });
   });
 
@@ -61,6 +62,17 @@ describe('PiCrewCheckpointStore', () => {
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain('project-a');
     expect(diagnostics[0]).toContain('run-1');
+  });
+
+  it('uses a visible default diagnostic when no callback is injected', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const store = new PiCrewCheckpointStore({ rootDir: stateDir });
+    store.save('project-a', 'run-1', { committedOffset: 1, recentEventIds: [] });
+    const [checkpointPath] = findCheckpointFiles(stateDir);
+    fs.writeFileSync(checkpointPath!, '{not-json');
+
+    expect(store.load('project-a', 'run-1')).toBeNull();
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('project=project-a'));
   });
 
   it('rejects a JSON checkpoint with an invalid reader identity', () => {

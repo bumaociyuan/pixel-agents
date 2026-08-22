@@ -59,7 +59,7 @@ export class IncrementalJsonlReader<T> {
   private lineParts: Buffer[] = [];
   private lineLength = 0;
   private records: ParsedJsonlRecord<T>[] = [];
-  private malformedCompleteLineCount = 0;
+  private malformedAfterLastValidRecord = false;
   private lastDiagnosticAt = Number.NEGATIVE_INFINITY;
   private readonly chunkSize: number;
   private readonly strictUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
@@ -118,7 +118,7 @@ export class IncrementalJsonlReader<T> {
     this.lineParts = [];
     this.lineLength = 0;
     this.records = [];
-    this.malformedCompleteLineCount = 0;
+    this.malformedAfterLastValidRecord = false;
   }
 
   hasRecentEventId(eventId: string): boolean {
@@ -135,7 +135,36 @@ export class IncrementalJsonlReader<T> {
   }
 
   hasUncertainTrailingData(): boolean {
-    return this.lineLength > 0 || this.malformedCompleteLineCount > 0;
+    return this.lineLength > 0 || this.malformedAfterLastValidRecord;
+  }
+
+  prepareCommit(endOffset: number, eventId?: string): JsonlCheckpoint | null {
+    if (
+      !Number.isInteger(endOffset) ||
+      !this.records.some((record) => record.endOffset === endOffset)
+    ) {
+      return null;
+    }
+    const recentEventIds = [...this.recentEventIds];
+    if (eventId) addRecentEventId(recentEventIds, eventId);
+    const committedAnchor = this.captureAnchor(endOffset);
+    return {
+      committedOffset: endOffset,
+      ...(this.fileIdentity ? { fileIdentity: { ...this.fileIdentity } } : {}),
+      ...(committedAnchor ? { committedAnchor } : {}),
+      recentEventIds,
+    };
+  }
+
+  finalizeCommit(checkpoint: JsonlCheckpoint): void {
+    if (!this.records.some((record) => record.endOffset === checkpoint.committedOffset)) return;
+    this.committedOffset = checkpoint.committedOffset;
+    this.fileIdentity = checkpoint.fileIdentity ? { ...checkpoint.fileIdentity } : undefined;
+    this.committedAnchor = checkpoint.committedAnchor
+      ? { ...checkpoint.committedAnchor }
+      : undefined;
+    this.recentEventIds.splice(0, this.recentEventIds.length, ...checkpoint.recentEventIds);
+    this.records = this.records.filter((record) => record.endOffset > this.committedOffset);
   }
 
   snapshot(): JsonlCheckpoint {
@@ -242,9 +271,10 @@ export class IncrementalJsonlReader<T> {
             endOffset,
             value: JSON.parse(line) as T,
           });
+          this.malformedAfterLastValidRecord = false;
         }
       } catch {
-        this.malformedCompleteLineCount += 1;
+        this.malformedAfterLastValidRecord = true;
         this.reportMalformedLine(this.lineStartOffset);
       }
 
@@ -298,6 +328,15 @@ export class IncrementalJsonlReader<T> {
     if (now - this.lastDiagnosticAt < DIAGNOSTIC_INTERVAL_MS) return;
     this.lastDiagnosticAt = now;
     this.options.onDiagnostic?.(`Malformed JSONL record at byte offset ${offset}`);
+  }
+}
+
+function addRecentEventId(recentEventIds: string[], eventId: string): void {
+  const existingIndex = recentEventIds.indexOf(eventId);
+  if (existingIndex >= 0) recentEventIds.splice(existingIndex, 1);
+  recentEventIds.push(eventId);
+  if (recentEventIds.length > PI_CREW_RECENT_EVENT_IDS_MAX) {
+    recentEventIds.splice(0, recentEventIds.length - PI_CREW_RECENT_EVENT_IDS_MAX);
   }
 }
 

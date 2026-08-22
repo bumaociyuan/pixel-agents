@@ -111,9 +111,8 @@ export class PiCrewCheckpointStore {
   }
 
   private reportDiagnostic(projectKey: string, runId: string, detail: string): void {
-    this.options.onDiagnostic?.(
-      `pi-crew checkpoint [project=${projectKey} run=${runId}]: ${detail}`,
-    );
+    const message = `pi-crew checkpoint [project=${projectKey} run=${runId}]: ${detail}`;
+    (this.options.onDiagnostic ?? console.warn)(message);
   }
 }
 

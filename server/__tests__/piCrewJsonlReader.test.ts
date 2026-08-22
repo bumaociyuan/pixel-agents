@@ -204,4 +204,13 @@ describe('IncrementalJsonlReader', () => {
     expect(reader.snapshot().committedOffset).toBe(firstLine.length);
     expect(reader.readAvailable()).toEqual([records[1]]);
   });
+
+  it('does not treat malformed history before a valid final record as an uncertain tail', () => {
+    fs.writeFileSync(eventsPath, '{not-json}\n{"type":"run.completed"}\n');
+    const reader = new IncrementalJsonlReader(eventsPath);
+
+    reader.readAvailable();
+
+    expect(reader.hasUncertainTrailingData()).toBe(false);
+  });
 });
