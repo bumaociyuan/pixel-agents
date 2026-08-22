@@ -265,6 +265,133 @@ describe('PiCrewEventWatcher', () => {
     expect(replayedPayloads).toEqual([]);
     restarted.stop();
   });
+
+  it('does not cross an unconfirmed record to commit a later confirmed record', () => {
+    writeRun(tempDir, 'ordered-confirmation', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'ordered-confirmation' },
+      {
+        time: '2026-08-22T00:00:01.000Z',
+        type: 'task.started',
+        runId: 'ordered-confirmation',
+        taskId: 't1',
+      },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const watcher = createCapturingWatcher(tempDir, [], store, ...[false, true]);
+
+    watcher.start();
+
+    expect(store.load(createProjectScope(tempDir).key, 'ordered-confirmation')).toBeNull();
+    watcher.stop();
+  });
+
+  it('re-emits the original payload from the same watcher after a failed confirmation', () => {
+    writeRun(tempDir, 'retry-same-watcher', [
+      { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'retry-same-watcher' },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    let confirmed = false;
+    const captured: Record<string, unknown>[] = [];
+    const watcher = createCapturingWatcher(tempDir, captured, store, () => confirmed);
+
+    watcher.start();
+    confirmed = true;
+    (watcher as unknown as { poll: () => void }).poll();
+
+    expect(captured.map((payload) => payload.hook_event_name)).toEqual([
+      'CrewSessionStart',
+      'CrewPlanStart',
+      'CrewSessionStart',
+      'CrewPlanStart',
+    ]);
+    expect(
+      store.load(createProjectScope(tempDir).key, 'retry-same-watcher')?.committedOffset,
+    ).toBeGreaterThan(0);
+    watcher.stop();
+  });
+
+  it('rebuilds lifecycle when rotation replaces a terminal run with a new active history', () => {
+    const { eventsPath } = writeRun(tempDir, 'rotated-run', [
+      {
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'run.created',
+        runId: 'rotated-run',
+        metadata: { fingerprint: 'old-created' },
+      },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const captured: Record<string, unknown>[] = [];
+    const watcher = createCapturingWatcher(tempDir, captured, store, () => true);
+    watcher.start();
+    fs.appendFileSync(
+      eventsPath,
+      `${JSON.stringify({ time: '2026-08-22T00:00:01.000Z', type: 'run.completed', runId: 'rotated-run', metadata: { fingerprint: 'old-completed' } })}\n`,
+    );
+    (watcher as unknown as { poll: () => void }).poll();
+    fs.renameSync(eventsPath, `${eventsPath}.old`);
+    fs.writeFileSync(
+      eventsPath,
+      `${JSON.stringify({ time: '2026-08-22T00:00:02.000Z', type: 'run.created', runId: 'rotated-run', metadata: { fingerprint: 'replacement-created' } })}\n`,
+    );
+
+    (watcher as unknown as { poll: () => void }).poll();
+
+    expect(captured.slice(-2).map((payload) => payload.hook_event_name)).toEqual([
+      'CrewSessionStart',
+      'CrewPlanStart',
+    ]);
+    watcher.stop();
+  });
+
+  it('stores confirmed source event IDs and suppresses them after rotation', () => {
+    const { eventsPath } = writeRun(tempDir, 'dedupe-run', [
+      {
+        time: '2026-08-22T00:00:00.000Z',
+        type: 'run.created',
+        runId: 'dedupe-run',
+        metadata: { fingerprint: 'same-source' },
+      },
+    ]);
+    const store = new PiCrewCheckpointStore({ rootDir: path.join(tempDir, 'pixel-agents-state') });
+    const captured: Record<string, unknown>[] = [];
+    const watcher = createCapturingWatcher(tempDir, captured, store, () => true);
+    watcher.start();
+    fs.renameSync(eventsPath, `${eventsPath}.old`);
+    fs.writeFileSync(
+      eventsPath,
+      `${JSON.stringify({ time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'dedupe-run', metadata: { fingerprint: 'same-source' } })}\n`,
+    );
+
+    (watcher as unknown as { poll: () => void }).poll();
+
+    expect(store.load(createProjectScope(tempDir).key, 'dedupe-run')?.recentEventIds).toEqual([
+      'same-source',
+    ]);
+    expect(captured).toHaveLength(2);
+    watcher.stop();
+  });
+
+  it.each(['{not-json}\n', '{"time":"2026-08-22T00:00:02.000Z"'])(
+    'does not skip a terminal history with a malformed or partial tail',
+    (tail) => {
+      const captured: Record<string, unknown>[] = [];
+      const { eventsPath } = writeRun(tempDir, 'uncertain-terminal', [
+        { time: '2026-08-22T00:00:00.000Z', type: 'run.created', runId: 'uncertain-terminal' },
+        { time: '2026-08-22T00:00:01.000Z', type: 'run.completed', runId: 'uncertain-terminal' },
+      ]);
+      fs.appendFileSync(eventsPath, tail);
+      const store = new PiCrewCheckpointStore({
+        rootDir: path.join(tempDir, 'pixel-agents-state'),
+      });
+      const watcher = createCapturingWatcher(tempDir, captured, store);
+
+      watcher.start();
+
+      expect(captured).not.toEqual([]);
+      expect(store.load(createProjectScope(tempDir).key, 'uncertain-terminal')).toBeNull();
+      watcher.stop();
+    },
+  );
 });
 
 function writeRun(
@@ -283,14 +410,20 @@ function createCapturingWatcher(
   tempDir: string,
   captured: Record<string, unknown>[],
   checkpointStore: PiCrewCheckpointStore,
-  onEventDeliveryConfirmed?: () => boolean,
+  ...confirmations: Array<boolean | (() => boolean)>
 ): PiCrewEventWatcher {
+  let confirmationIndex = 0;
   const watcher = new PiCrewEventWatcher({
     projectDirs: [tempDir],
     serverUrl: 'http://127.0.0.1:1234',
     authToken: 'test-token',
     checkpointStore,
-    onEventDeliveryConfirmed,
+    onEventDeliveryConfirmed: () => {
+      const confirmation = confirmations[Math.min(confirmationIndex, confirmations.length - 1)];
+      if (typeof confirmation === 'function') return confirmation();
+      confirmationIndex += 1;
+      return confirmation === true;
+    },
   });
   (watcher as unknown as { postToHook: (payload: Record<string, unknown>) => void }).postToHook = (
     payload,

@@ -110,6 +110,33 @@ describe('PiCrewCheckpointStore', () => {
     expect(store.load('project-a', 'run-1')).toBeNull();
     expect(store.load('project-a', 'run-2')?.committedOffset).toBe(2);
   });
+
+  it.each(['writeFileSync', 'fsyncSync', 'closeSync', 'renameSync'] as const)(
+    'cleans the temporary file when %s fails',
+    (operation) => {
+      const failure = new Error(`${operation} failed`);
+      let failOnce = true;
+      const files = {
+        ...fs,
+        [operation]: (...args: never[]) => {
+          if (failOnce) {
+            failOnce = false;
+            throw failure;
+          }
+          return (fs[operation] as (...innerArgs: never[]) => unknown)(...args);
+        },
+      };
+      const store = new PiCrewCheckpointStore({
+        rootDir: stateDir,
+        fileSystem: files,
+      } as never);
+
+      expect(() =>
+        store.save('project-a', 'run-1', { committedOffset: 1, recentEventIds: [] }),
+      ).toThrow(failure);
+      expect(findTemporaryFiles(stateDir)).toEqual([]);
+    },
+  );
 });
 
 function findCheckpointFiles(rootDir: string): string[] {
@@ -119,6 +146,17 @@ function findCheckpointFiles(rootDir: string): string[] {
     const entryPath = path.join(rootDir, entry.name);
     if (entry.isDirectory()) files.push(...findCheckpointFiles(entryPath));
     else if (entry.name.endsWith('.json')) files.push(entryPath);
+  }
+  return files;
+}
+
+function findTemporaryFiles(rootDir: string): string[] {
+  if (!fs.existsSync(rootDir)) return [];
+  const files: string[] = [];
+  for (const entry of fs.readdirSync(rootDir, { withFileTypes: true })) {
+    const entryPath = path.join(rootDir, entry.name);
+    if (entry.isDirectory()) files.push(...findTemporaryFiles(entryPath));
+    else if (entry.name.includes('.tmp-')) files.push(entryPath);
   }
   return files;
 }

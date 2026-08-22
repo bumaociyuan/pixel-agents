@@ -3,6 +3,8 @@ import * as fs from 'node:fs';
 import { StringDecoder } from 'node:string_decoder';
 import { TextDecoder } from 'node:util';
 
+import { PI_CREW_RECENT_EVENT_IDS_MAX } from './constants.js';
+
 const DEFAULT_CHUNK_SIZE = 64 * 1024;
 const FINGERPRINT_BYTES = 4096;
 const COMMIT_ANCHOR_BYTES = 1024;
@@ -39,6 +41,7 @@ export interface IncrementalJsonlReaderOptions {
   checkpoint?: JsonlCheckpoint;
   chunkSize?: number;
   onDiagnostic?: (message: string) => void;
+  onReset?: () => void;
 }
 
 interface ObservedFile {
@@ -56,6 +59,7 @@ export class IncrementalJsonlReader<T> {
   private lineParts: Buffer[] = [];
   private lineLength = 0;
   private records: ParsedJsonlRecord<T>[] = [];
+  private malformedCompleteLineCount = 0;
   private lastDiagnosticAt = Number.NEGATIVE_INFINITY;
   private readonly chunkSize: number;
   private readonly strictUtf8Decoder = new TextDecoder('utf-8', { fatal: true });
@@ -85,6 +89,7 @@ export class IncrementalJsonlReader<T> {
 
     if (this.requiresReset(observed)) {
       this.reset();
+      this.options.onReset?.();
     }
     this.fileIdentity = observed.identity;
 
@@ -113,6 +118,24 @@ export class IncrementalJsonlReader<T> {
     this.lineParts = [];
     this.lineLength = 0;
     this.records = [];
+    this.malformedCompleteLineCount = 0;
+  }
+
+  hasRecentEventId(eventId: string): boolean {
+    return this.recentEventIds.includes(eventId);
+  }
+
+  rememberEventId(eventId: string): void {
+    const existingIndex = this.recentEventIds.indexOf(eventId);
+    if (existingIndex >= 0) this.recentEventIds.splice(existingIndex, 1);
+    this.recentEventIds.push(eventId);
+    if (this.recentEventIds.length > PI_CREW_RECENT_EVENT_IDS_MAX) {
+      this.recentEventIds.splice(0, this.recentEventIds.length - PI_CREW_RECENT_EVENT_IDS_MAX);
+    }
+  }
+
+  hasUncertainTrailingData(): boolean {
+    return this.lineLength > 0 || this.malformedCompleteLineCount > 0;
   }
 
   snapshot(): JsonlCheckpoint {
@@ -221,6 +244,7 @@ export class IncrementalJsonlReader<T> {
           });
         }
       } catch {
+        this.malformedCompleteLineCount += 1;
         this.reportMalformedLine(this.lineStartOffset);
       }
 

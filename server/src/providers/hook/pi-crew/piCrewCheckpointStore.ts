@@ -10,23 +10,37 @@ export interface PiCrewCheckpointStoreOptions {
   /** Pixel Agents state directory. Checkpoints are never stored in the watched project. */
   rootDir?: string;
   onDiagnostic?: (message: string) => void;
+  fileSystem?: CheckpointFileSystem;
+}
+
+interface CheckpointFileSystem {
+  mkdirSync: typeof fs.mkdirSync;
+  readFileSync: typeof fs.readFileSync;
+  openSync: typeof fs.openSync;
+  writeFileSync: typeof fs.writeFileSync;
+  fsyncSync: typeof fs.fsyncSync;
+  closeSync: typeof fs.closeSync;
+  renameSync: typeof fs.renameSync;
+  unlinkSync: typeof fs.unlinkSync;
 }
 
 /** Persists one reader checkpoint per stable project/run identity. */
 export class PiCrewCheckpointStore {
   private tempSequence = 0;
   private readonly rootDir: string;
+  private readonly files: CheckpointFileSystem;
 
   constructor(private readonly options: PiCrewCheckpointStoreOptions = {}) {
     this.rootDir =
       options.rootDir ?? path.join(os.homedir(), LAYOUT_FILE_DIR, PI_CREW_CHECKPOINTS_DIR);
+    this.files = options.fileSystem ?? fs;
   }
 
   load(projectKey: string, runId: string): JsonlCheckpoint | null {
     const checkpointPath = this.checkpointPath(projectKey, runId);
     let raw: string;
     try {
-      raw = fs.readFileSync(checkpointPath, 'utf8');
+      raw = this.files.readFileSync(checkpointPath, 'utf8');
     } catch (error) {
       if (isMissing(error)) return null;
       this.reportDiagnostic(projectKey, runId, `cannot read checkpoint: ${errorMessage(error)}`);
@@ -44,7 +58,7 @@ export class PiCrewCheckpointStore {
   save(projectKey: string, runId: string, checkpoint: JsonlCheckpoint): void {
     const checkpointPath = this.checkpointPath(projectKey, runId);
     const directory = path.dirname(checkpointPath);
-    fs.mkdirSync(directory, { recursive: true });
+    this.files.mkdirSync(directory, { recursive: true });
 
     const normalized = normalizeCheckpoint(checkpoint);
     const tempPath = path.join(
@@ -52,19 +66,25 @@ export class PiCrewCheckpointStore {
       `.${path.basename(checkpointPath)}.tmp-${process.pid}-${this.tempSequence++}`,
     );
     let fd: number | undefined;
+    let renamed = false;
     try {
-      fd = fs.openSync(tempPath, 'w', 0o600);
-      fs.writeFileSync(fd, JSON.stringify(normalized));
-      fs.fsyncSync(fd);
-    } finally {
-      if (fd !== undefined) fs.closeSync(fd);
-    }
-
-    try {
-      fs.renameSync(tempPath, checkpointPath);
+      fd = this.files.openSync(tempPath, 'w', 0o600);
+      this.files.writeFileSync(fd, JSON.stringify(normalized));
+      this.files.fsyncSync(fd);
+      this.files.closeSync(fd);
+      fd = undefined;
+      this.files.renameSync(tempPath, checkpointPath);
+      renamed = true;
     } catch (error) {
+      if (fd !== undefined) {
+        try {
+          this.files.closeSync(fd);
+        } catch {
+          // The original failure is more useful than a cleanup failure.
+        }
+      }
       try {
-        fs.unlinkSync(tempPath);
+        if (!renamed) this.files.unlinkSync(tempPath);
       } catch {
         // The original checkpoint remains intact; cleanup is best effort.
       }
@@ -74,7 +94,7 @@ export class PiCrewCheckpointStore {
 
   remove(projectKey: string, runId: string): void {
     try {
-      fs.unlinkSync(this.checkpointPath(projectKey, runId));
+      this.files.unlinkSync(this.checkpointPath(projectKey, runId));
     } catch (error) {
       if (!isMissing(error)) {
         this.reportDiagnostic(
