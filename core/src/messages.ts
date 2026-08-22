@@ -74,6 +74,9 @@ export interface AgentCreated {
   type: 'agentCreated';
   id: number;
   folderName?: string;
+  projectKey?: string;
+  projectAreaLabels?: string[];
+  preferredArea?: string;
   isExternal?: boolean;
   palette?: number;
   hueShift?: number;
@@ -101,6 +104,9 @@ export interface AgentSeatMeta {
   palette?: number;
   hueShift?: number;
   seatId?: string;
+  projectKey?: string;
+  projectAreaLabels?: string[];
+  preferredArea?: string;
 }
 
 export interface AgentStatus {

@@ -182,6 +182,17 @@ components:
           type: integer
         folderName:
           type: string
+        projectKey:
+          type: string
+          description: Stable project identity for cross-workspace Area placement.
+        projectAreaLabels:
+          type: array
+          items:
+            type: string
+          description: All Area labels associated with the project, in priority order.
+        preferredArea:
+          type: string
+          description: Compatibility fallback when only one project Area label is available.
         isExternal:
           type: boolean
         palette:
@@ -1079,6 +1090,14 @@ components:
         hueShift:
           type: integer
         seatId:
+          type: string
+        projectKey:
+          type: string
+        projectAreaLabels:
+          type: array
+          items:
+            type: string
+        preferredArea:
           type: string
 
     SeatAssignment:

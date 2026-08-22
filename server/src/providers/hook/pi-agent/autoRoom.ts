@@ -284,13 +284,18 @@ function assignChairsToArea(layout: Record<string, unknown>, areaLabel: string):
   }
 }
 
-function bundledSeatCatalog(): SeatTileCatalogEntry[] {
+/** Resolve bundled manifests in source trees and packaged dist output without throwing. */
+export function bundledSeatCatalog(
+  moduleDir = __dirname,
+  onDiagnostic?: (message: string) => void,
+): SeatTileCatalogEntry[] {
   const assetRoots = [
-    path.resolve(__dirname, '../../../../../webview-ui/public/assets'),
-    path.resolve(__dirname, 'webview/assets'),
+    path.resolve(moduleDir, '../../../../../webview-ui/public/assets'),
+    path.resolve(moduleDir, 'assets'),
+    path.resolve(moduleDir, 'webview/assets'),
   ];
 
-  for (const assetRoot of assetRoots) {
+  for (const assetRoot of new Set(assetRoots)) {
     const catalog = buildFurnitureCatalog(assetRoot);
     if (catalog.length > 0) {
       return catalog.map(({ id, category, footprintW, footprintH, backgroundTiles }) => ({
@@ -303,6 +308,9 @@ function bundledSeatCatalog(): SeatTileCatalogEntry[] {
     }
   }
 
+  const message = `[Pixel Agents] auto-room: bundled furniture catalog not found (checked ${assetRoots.join(', ')})`;
+  if (onDiagnostic) onDiagnostic(message);
+  else console.warn(message);
   return [];
 }
 

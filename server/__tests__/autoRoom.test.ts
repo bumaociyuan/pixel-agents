@@ -8,6 +8,7 @@ import { readConfig, writeConfig } from '../src/configPersistence.js';
 import { readLayoutFromFile, writeLayoutToFile } from '../src/layoutPersistence.js';
 import {
   autoCreateRoomForProject,
+  bundledSeatCatalog,
   ensureProjectArea,
   getProjectAreaLabels,
   migrateProjectAreas,
@@ -311,4 +312,66 @@ describe('autoRoom: areaMappings key fix', () => {
 
     expect(readLayoutFromFile()?.areaTiles).toEqual([null, null, null, null]);
   });
+
+  it('resolves bundled furniture from source assets and compiled dist/assets', () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-seat-assets-'));
+    const sourceModuleDir = path.join(
+      fixtureRoot,
+      'server',
+      'src',
+      'providers',
+      'hook',
+      'pi-agent',
+    );
+    const compiledModuleDir = path.join(fixtureRoot, 'dist');
+    writeChairManifest(path.join(fixtureRoot, 'webview-ui', 'public', 'assets'));
+    writeChairManifest(path.join(compiledModuleDir, 'assets'));
+
+    try {
+      expect(bundledSeatCatalog(sourceModuleDir)).toEqual([
+        expect.objectContaining({ id: 'TEST_CHAIR', category: 'chairs' }),
+      ]);
+      expect(bundledSeatCatalog(compiledModuleDir)).toEqual([
+        expect.objectContaining({ id: 'TEST_CHAIR', category: 'chairs' }),
+      ]);
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
+
+  it('returns no seats and reports when no bundled asset root is available', () => {
+    const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-seat-assets-missing-'));
+    const diagnostics: string[] = [];
+
+    try {
+      expect(
+        bundledSeatCatalog(path.join(fixtureRoot, 'dist'), (message) => diagnostics.push(message)),
+      ).toEqual([]);
+      expect(diagnostics.join('\n')).toContain('furniture catalog');
+    } finally {
+      fs.rmSync(fixtureRoot, { recursive: true, force: true });
+    }
+  });
 });
+
+function writeChairManifest(assetRoot: string): void {
+  const chairDir = path.join(assetRoot, 'furniture', 'TEST_CHAIR');
+  fs.mkdirSync(chairDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(chairDir, 'manifest.json'),
+    JSON.stringify({
+      id: 'TEST_CHAIR',
+      name: 'Test Chair',
+      category: 'chairs',
+      type: 'asset',
+      file: 'chair.png',
+      width: 16,
+      height: 16,
+      footprintW: 1,
+      footprintH: 1,
+      canPlaceOnWalls: false,
+      canPlaceOnSurfaces: false,
+      backgroundTiles: 0,
+    }),
+  );
+}
