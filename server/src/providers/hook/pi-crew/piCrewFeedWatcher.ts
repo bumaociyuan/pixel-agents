@@ -32,6 +32,8 @@ export interface EventWatcherOptions {
   serverUrl: string;
   /** Bearer token for the hook endpoint. */
   authToken: string;
+  /** Called when a new project directory is discovered (auto-room creation). */
+  onNewProject?: (projectDir: string) => void;
 }
 
 export class PiCrewEventWatcher {
@@ -40,6 +42,8 @@ export class PiCrewEventWatcher {
   private runStates = new Map<string, RunEventState>();
   /** Track task ownership across runs: taskId → agentName */
   private taskOwners = new Map<string, string>();
+  /** Known project directories (for new-project detection). */
+  private knownProjects = new Set<string>();
 
   constructor(private opts: EventWatcherOptions) {}
 
@@ -99,6 +103,13 @@ export class PiCrewEventWatcher {
       entries = fs.readdirSync(runsDir, { withFileTypes: true });
     } catch {
       return; // No .crew/state/runs/ directory yet
+    }
+
+    // Detect new project directories for auto-room creation
+    if (!this.knownProjects.has(projectDir)) {
+      this.knownProjects.add(projectDir);
+      console.log(`[Pixel Agents] pi-crew: new project detected: ${projectDir}`);
+      this.opts.onNewProject?.(projectDir);
     }
 
     for (const entry of entries) {

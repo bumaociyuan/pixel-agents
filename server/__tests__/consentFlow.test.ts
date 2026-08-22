@@ -127,6 +127,8 @@ describe('clientMessageHandler: hooks consent flow', () => {
 
     it('never asks once consent is recorded', async () => {
       grantHooksConsent('claude');
+      grantHooksConsent('pi-agent');
+      grantHooksConsent('pi-crew');
       await connect();
 
       expect(sent.find((m) => m.type === 'hooksConsentRequest')).toBeUndefined();
@@ -137,6 +139,8 @@ describe('clientMessageHandler: hooks consent flow', () => {
     // ours installed.
     it('never asks while our hooks are already installed', async () => {
       seedInstalledHooks();
+      grantHooksConsent('pi-agent');
+      grantHooksConsent('pi-crew');
       await connect();
 
       expect(sent.find((m) => m.type === 'hooksConsentRequest')).toBeUndefined();
@@ -146,6 +150,8 @@ describe('clientMessageHandler: hooks consent flow', () => {
       // The preference alone (a Settings toggle-off records no consent), so
       // this isolates the hooksEnabled gate from the consentAnswered gate.
       setHooksEnabled('claude', false);
+      setHooksEnabled('pi-agent', false);
+      setHooksEnabled('pi-crew', false);
       await connect();
 
       expect(sent.find((m) => m.type === 'hooksConsentRequest')).toBeUndefined();

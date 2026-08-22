@@ -50,3 +50,9 @@ agent-orchestrator.yaml
 .ao/
 .serena/
 tasks/
+/.crew/
+/.crew
+!.crew/artifacts/
+!.crew/graphs/
+!.crew/artifacts/.gitkeep
+!.crew/graphs/.gitkeep

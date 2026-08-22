@@ -27,6 +27,7 @@ import {
 } from './configPersistence.js';
 import { MAX_PORT, MIN_PORT } from './constants.js';
 import { FileStateAdapter } from './fileStateAdapter.js';
+import { migrateAutoRoomConfig } from './providers/hook/pi-agent/autoRoom.js';
 import {
   claudeProvider,
   copyHookScript,
@@ -304,6 +305,9 @@ async function main(): Promise<void> {
         );
       }
     }
+
+    // ── auto-room: migrate legacy areaMappings keys + assign chairs ──
+    migrateAutoRoomConfig();
 
     // ── pi-agent: auto-install herdr watcher on startup ──
     if (getHooksEnabled(piAgentProvider.id) && getHooksConsent(piAgentProvider.id) === 'granted') {

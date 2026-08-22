@@ -142,17 +142,19 @@ export class PiAgentWatcher {
 
       if (!known) {
         this.sendSessionStart(pane);
-        if (pane.agent_status === 'working') {
-          // Working agents: show tool activity at desk
-          this.sendToolStart(pane);
-        } else {
-          // Idle/blocked agents: confirm session with a dummy event
-          // so they appear but NOT at their desks (no active tool)
-          this.sendConfirm(pane);
-          if (pane.agent_status === 'blocked') {
-            this.sendBlocked(pane);
+        // Delay confirm/tool events to avoid race: SessionStart must arrive
+        // at the server before the confirmation event, or the hook handler
+        // silently drops the confirmation (session not yet pending).
+        setTimeout(() => {
+          if (pane.agent_status === 'working') {
+            this.sendToolStart(pane);
+          } else {
+            this.sendConfirm(pane);
+            if (pane.agent_status === 'blocked') {
+              this.sendBlocked(pane);
+            }
           }
-        }
+        }, 500);
       } else if (known.agent_status !== pane.agent_status) {
         this.handleTransition(known, pane);
       }
@@ -188,6 +190,8 @@ export class PiAgentWatcher {
           this.pendingToolEnds.delete(newState.pane_id);
           console.log(`[Pixel Agents] pi-agent: debounced toolEnd for ${newState.pane_id}`);
           this.sendToolEnd(agent);
+          // After toolEnd, send confirm to transition agent to waiting state
+          this.sendConfirm(agent);
         }, PI_AGENT_TOOL_END_DEBOUNCE_MS),
       );
     }

@@ -127,6 +127,7 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
         type: 'agentCreated',
         id,
         folderName: agent.folderName,
+        preferredArea: agent.preferredArea,
         isExternal: agent.isExternal || undefined,
         isTeammate: agent.leadAgentId !== undefined || undefined,
         teammateName: agent.agentName,
@@ -655,9 +656,15 @@ export class PixelAgentsViewProvider implements vscode.WebviewViewProvider {
 
         // Folder→Area mappings (must arrive before any agentCreated/existingAgents
         // so OfficeState.findFreeSeat has the dict when characters are placed).
+        // Merge standalone + vscode areaMappings — autoRoom writes to both, but
+        // legacy configs may have entries in only one namespace.
+        const mergedMappings: Record<string, string[]> = {
+          ...(config.standalone.areaMappings ?? {}),
+          ...(config.vscode.areaMappings ?? {}),
+        };
         this.webview?.postMessage({
           type: 'areaMappingsLoaded',
-          mappings: config.vscode.areaMappings ?? {},
+          mappings: mergedMappings,
         });
 
         restoreAgents(

@@ -26,6 +26,7 @@
  */
 
 import type { AgentEvent, HookProvider } from '../../../../../core/src/provider.js';
+import { autoCreateRoomForProject } from '../pi-agent/autoRoom.js';
 import { PI_CREW_CONSENT_DISCLOSURE, PI_CREW_CONSENT_HEADLINE } from './consentCopy.js';
 import {
   PI_CREW_DISPLAY_NAME,
@@ -480,6 +481,7 @@ async function installHooks(serverUrl: string, authToken: string): Promise<void>
     projectDirs,
     serverUrl,
     authToken,
+    onNewProject: (projectDir) => autoCreateRoomForProject(projectDir),
   });
   eventWatcher.start();
   console.log('[Pixel Agents] pi-crew: hooks installed, event watcher started');
