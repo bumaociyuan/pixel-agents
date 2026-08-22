@@ -172,6 +172,9 @@ describe('buildAgentDiagnostics', () => {
     ['https://example.test/hook?access_token=token-3&ok=1', 'token-3'],
     ['authorization=token-4 authToken: token-5', 'token-5'],
     ['Cookie: session=token-6; Set-Cookie: refresh=token-7', 'token-7'],
+    ['{"password":"pw-1","clientSecret":"secret-1","refresh_token":"token-8"}', 'secret-1'],
+    ['https://example.test/hook?API_KEY=key-1&token=token-9', 'token-9'],
+    ['X-API-Key: key-2 passwd=pass-1 SECRET: secret-2', 'secret-2'],
   ])('redacts sensitive diagnostic text: %s', (message, secret) => {
     const result = recordPiCrewDiagnostic({ category: 'delivery', message });
 
@@ -192,5 +195,16 @@ describe('buildAgentDiagnostics', () => {
     expect(first).toMatchObject({ isNew: true, shouldEmit: true });
     expect(repeated).toMatchObject({ isNew: false, shouldEmit: false });
     expect(repeated.diagnostic.count).toBe(2);
+  });
+
+  it('keeps non-sensitive diagnostic context intact', () => {
+    const result = recordPiCrewDiagnostic({
+      category: 'reader',
+      message: 'cannot read /tmp/events.jsonl at offset=42 for run=run-1',
+    });
+
+    expect(result.diagnostic.message).toBe(
+      'cannot read /tmp/events.jsonl at offset=42 for run=run-1',
+    );
   });
 });

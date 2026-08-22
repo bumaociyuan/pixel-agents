@@ -83,6 +83,23 @@ describe('PiCrewCheckpointStore', () => {
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('project=project-a'));
   });
 
+  it('uses a structured callback without bypassing watcher rate limiting through console.warn', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const records: unknown[] = [];
+    const store = new PiCrewCheckpointStore({
+      rootDir: stateDir,
+      onDiagnosticRecord: (diagnostic) => records.push(diagnostic),
+    });
+    store.save('project-a', 'run-1', { committedOffset: 1, recentEventIds: [] });
+    const [checkpointPath] = findCheckpointFiles(stateDir);
+    fs.writeFileSync(checkpointPath!, '{not-json');
+
+    expect(store.load('project-a', 'run-1')).toBeNull();
+    expect(records).toHaveLength(1);
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
   it('rejects a JSON checkpoint with an invalid reader identity', () => {
     const diagnostics: string[] = [];
     const store = new PiCrewCheckpointStore({

@@ -128,7 +128,8 @@ export class PiCrewCheckpointStore {
       runId,
       file: this.checkpointPath(projectKey, runId),
     });
-    (this.options.onDiagnostic ?? console.warn)(message);
+    if (this.options.onDiagnostic) this.options.onDiagnostic(message);
+    else if (!this.options.onDiagnosticRecord) console.warn(message);
   }
 }
 
