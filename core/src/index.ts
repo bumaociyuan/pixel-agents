@@ -11,6 +11,13 @@ export {
   TASK_DESCRIPTION_DISPLAY_MAX_LENGTH,
 } from './constants.js';
 export type { ClientMessage, FurnitureAssetMessage, ServerMessage } from './messages.js';
+export type { ProjectScope } from './projectScope.js';
+export {
+  canonicalizeProjectPath,
+  createProjectScope,
+  dedupeProjectScopes,
+  projectKeyFromPath,
+} from './projectScope.js';
 export type { AgentEvent, HookProvider } from './provider.js';
 export type {
   AgentMeta,
