@@ -89,6 +89,10 @@ export const HOOK_EVENT_BUFFER_MS = 5_000;
  *  the agent is cleaned up instead of staying as a zombie with pendingClear forever. */
 export const SESSION_END_GRACE_MS = 2000;
 export const MAX_HOOK_BODY_SIZE = 65_536; // 64KB
+/** Duplicate hook deliveries with the same provider/key are ignored for this long. */
+export const HOOK_IDEMPOTENCY_TTL_MS = 15 * 60 * 1000;
+/** Bound the ingress idempotency cache so untrusted headers cannot grow it indefinitely. */
+export const HOOK_IDEMPOTENCY_MAX_ENTRIES = 4096;
 
 // ── Layout/Config Persistence ──────────────────────────────
 export const LAYOUT_FILE_DIR = '.pixel-agents';

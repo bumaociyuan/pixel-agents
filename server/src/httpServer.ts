@@ -15,6 +15,8 @@ import type {
 import { handleClientMessage } from './clientMessageHandler.js';
 import {
   HOOK_API_PREFIX,
+  HOOK_IDEMPOTENCY_MAX_ENTRIES,
+  HOOK_IDEMPOTENCY_TTL_MS,
   MAX_HOOK_BODY_SIZE,
   WS_CLOSE_FORBIDDEN_ORIGIN,
   WS_CLOSE_UNAUTHORIZED,
@@ -85,7 +87,7 @@ export async function createHttpServer(options: HttpServerOptions): Promise<Http
   // ── Routes ──────────────────────────────────────────────────
 
   registerHealthRoute(app);
-  registerHookRoute(app, options);
+  registerHookRoute(app, options, new HookIngressIdempotencyCache());
   registerWebSocketRoute(app, options);
 
   // ── Listen ──────────────────────────────────────────────────
@@ -109,7 +111,11 @@ function registerHealthRoute(app: FastifyInstance): void {
 
 // ── Hook Events ────────────────────────────────────────────────
 
-function registerHookRoute(app: FastifyInstance, options: HttpServerOptions): void {
+function registerHookRoute(
+  app: FastifyInstance,
+  options: HttpServerOptions,
+  idempotencyCache: HookIngressIdempotencyCache,
+): void {
   app.post<{
     Params: { providerId: string };
     Body: Record<string, unknown>;
@@ -130,14 +136,53 @@ function registerHookRoute(app: FastifyInstance, options: HttpServerOptions): vo
     async (request, reply) => {
       const { providerId } = request.params;
       const event = request.body;
+      const idempotencyKey = request.headers['x-pixel-agents-idempotency-key'];
 
-      if (event.session_id && event.hook_event_name) {
+      if (
+        event.session_id &&
+        event.hook_event_name &&
+        !idempotencyCache.has(providerId, idempotencyKey)
+      ) {
         options.onHookEvent?.(providerId, event);
       }
 
       reply.send('ok');
     },
   );
+}
+
+/** Per-server bounded TTL/LRU cache for successfully accepted hook deliveries. */
+class HookIngressIdempotencyCache {
+  private readonly entries = new Map<string, number>();
+
+  has(providerId: string, idempotencyKey: string | string[] | undefined): boolean {
+    if (typeof idempotencyKey !== 'string' || idempotencyKey.length === 0) return false;
+
+    const now = Date.now();
+    this.pruneExpired(now);
+    const key = `${providerId}:${idempotencyKey}`;
+    const expiresAt = this.entries.get(key);
+    if (expiresAt !== undefined && expiresAt > now) {
+      this.entries.delete(key);
+      this.entries.set(key, expiresAt);
+      return true;
+    }
+
+    this.entries.set(key, now + HOOK_IDEMPOTENCY_TTL_MS);
+    while (this.entries.size > HOOK_IDEMPOTENCY_MAX_ENTRIES) {
+      const oldestKey = this.entries.keys().next().value;
+      if (oldestKey === undefined) break;
+      this.entries.delete(oldestKey);
+    }
+    return false;
+  }
+
+  private pruneExpired(now: number): void {
+    for (const [key, expiresAt] of this.entries) {
+      if (expiresAt > now) continue;
+      this.entries.delete(key);
+    }
+  }
 }
 
 // ── WebSocket ──────────────────────────────────────────────────

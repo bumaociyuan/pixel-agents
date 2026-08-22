@@ -4,7 +4,11 @@ import * as path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { WebSocket } from 'ws';
 
-import { WS_CLOSE_FORBIDDEN_ORIGIN, WS_CLOSE_UNAUTHORIZED } from '../src/constants.js';
+import {
+  HOOK_IDEMPOTENCY_TTL_MS,
+  WS_CLOSE_FORBIDDEN_ORIGIN,
+  WS_CLOSE_UNAUTHORIZED,
+} from '../src/constants.js';
 
 // Isolated temp HOME: the server writes ~/.pixel-agents/{server.json,servers/}
 // and the consent assertions below read ~/.pixel-agents/config.json.
@@ -19,6 +23,24 @@ const { PixelAgentsServer } = await import('../src/server.js');
 const { AgentStateStore } = await import('../src/agentStateStore.js');
 const { grantHooksConsent } = await import('../src/configPersistence.js');
 
+async function postHook(
+  port: number,
+  token: string,
+  providerId: string,
+  event: Record<string, unknown>,
+  idempotencyKey?: string,
+): Promise<Response> {
+  return fetch(`http://127.0.0.1:${port.toString()}/api/hooks/${providerId}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${token}`,
+      ...(idempotencyKey ? { 'X-Pixel-Agents-Idempotency-Key': idempotencyKey } : {}),
+    },
+    body: JSON.stringify(event),
+  });
+}
+
 /** How long to wait, after the handshake, for a server-side rejection close.
  *  The gate runs synchronously in the route handler, so a rejection lands
  *  immediately; this is slack, not a real delay. */
@@ -31,6 +53,65 @@ interface ConnectResult {
   closeCode?: number;
   socket: WebSocket;
 }
+
+describe('hook ingress idempotency', () => {
+  let server: InstanceType<typeof PixelAgentsServer>;
+
+  beforeEach(() => {
+    tmpBase = fs.mkdtempSync(path.join(os.tmpdir(), 'pxl-hook-idempotency-'));
+    fs.mkdirSync(path.join(tmpBase, '.pixel-agents'), { recursive: true });
+    server = new PixelAgentsServer();
+  });
+
+  afterEach(() => {
+    server?.stop();
+    try {
+      fs.rmSync(tmpBase, { recursive: true, force: true });
+    } catch {
+      /* ignore */
+    }
+  });
+
+  it('dispatches one provider/key delivery once while accepting another provider independently', async () => {
+    const config = await server.start({ store: new AgentStateStore() });
+    const received: Array<{ providerId: string; event: Record<string, unknown> }> = [];
+    server.onHookEvent((providerId, event) => received.push({ providerId, event }));
+    const event = { session_id: 'pi-crew:project:run:agent', hook_event_name: 'CrewTaskStart' };
+
+    const first = await postHook(config.port, config.token, 'pi-crew', event, 'source-42:0');
+    const duplicate = await postHook(config.port, config.token, 'pi-crew', event, 'source-42:0');
+    const otherProvider = await postHook(config.port, config.token, 'claude', event, 'source-42:0');
+
+    expect(first.status).toBeGreaterThanOrEqual(200);
+    expect(first.status).toBeLessThan(300);
+    expect(duplicate.status).toBeGreaterThanOrEqual(200);
+    expect(duplicate.status).toBeLessThan(300);
+    expect(otherProvider.status).toBeGreaterThanOrEqual(200);
+    expect(otherProvider.status).toBeLessThan(300);
+    expect(received.map(({ providerId }) => providerId)).toEqual(['pi-crew', 'claude']);
+  });
+
+  it('allows an expired key and requests without an idempotency header', async () => {
+    const config = await server.start({ store: new AgentStateStore() });
+    const received: Record<string, unknown>[] = [];
+    server.onHookEvent((_providerId, event) => received.push(event));
+    const event = { session_id: 'session', hook_event_name: 'CrewProgress' };
+    const clock = vi.spyOn(Date, 'now');
+
+    try {
+      clock.mockReturnValue(1_000);
+      await postHook(config.port, config.token, 'pi-crew', event, 'expiring-key');
+      clock.mockReturnValue(1_000 + HOOK_IDEMPOTENCY_TTL_MS + 1);
+      await postHook(config.port, config.token, 'pi-crew', event, 'expiring-key');
+      await postHook(config.port, config.token, 'pi-crew', event);
+      await postHook(config.port, config.token, 'pi-crew', event);
+    } finally {
+      clock.mockRestore();
+    }
+
+    expect(received).toHaveLength(4);
+  });
+});
 
 /**
  * Open a /ws socket and report whether the server KEPT it. `@fastify/websocket`
