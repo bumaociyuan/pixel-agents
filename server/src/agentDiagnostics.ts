@@ -124,7 +124,7 @@ export function buildAgentDiagnostics(store: AgentStateStore): AgentDiagnosticsR
 
 function redactBearerToken(message: string): string {
   const sensitiveKey =
-    '(?:authorization|authToken|access_token|refresh_token|token|apiKey|api_key|x-api-key|password|passwd|secret|client_secret|clientSecret|cookie|set-cookie)';
+    '(?:authorization|authToken|auth|access_token|access|refresh_token|refresh|token|apiKey|api_key|x-api-key|api|password|passwd|secret|client_secret|clientSecret|cookie|set-cookie)';
   return message
     .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
     .replace(new RegExp(`([?&]${sensitiveKey}=)[^&#\\s]+`, 'gi'), '$1[redacted]')

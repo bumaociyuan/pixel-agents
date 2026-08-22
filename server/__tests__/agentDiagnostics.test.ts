@@ -175,6 +175,9 @@ describe('buildAgentDiagnostics', () => {
     ['{"password":"pw-1","clientSecret":"secret-1","refresh_token":"token-8"}', 'secret-1'],
     ['https://example.test/hook?API_KEY=key-1&token=token-9', 'token-9'],
     ['X-API-Key: key-2 passwd=pass-1 SECRET: secret-2', 'secret-2'],
+    ['{"access":"access-1","Refresh":"refresh-1","AUTH":"auth-1","api":"api-1"}', 'api-1'],
+    ['https://example.test/hook?access=access-2&refresh=refresh-2&auth=auth-2&api=api-2', 'api-2'],
+    ['access=access-3 Refresh: refresh-3 AUTH=auth-3 api: api-3', 'api-3'],
   ])('redacts sensitive diagnostic text: %s', (message, secret) => {
     const result = recordPiCrewDiagnostic({ category: 'delivery', message });
 
@@ -206,5 +209,14 @@ describe('buildAgentDiagnostics', () => {
     expect(result.diagnostic.message).toBe(
       'cannot read /tmp/events.jsonl at offset=42 for run=run-1',
     );
+  });
+
+  it('does not redact ordinary words that are not key/value pairs', () => {
+    const result = recordPiCrewDiagnostic({
+      category: 'reader',
+      message: 'refresh the API access path after auth succeeds',
+    });
+
+    expect(result.diagnostic.message).toBe('refresh the API access path after auth succeeds');
   });
 });
